@@ -370,6 +370,26 @@ export class Reach {
     return true;
   }
 
+  /** Пешее растекание от произвольных источников: seeds = [узел, секунды, ...]. Результат — в слот, как после run(). */
+  runSeeds(seeds, { walkMs, maxSec }, slot = 0) {
+    const st = this.states[slot];
+    this._dijkstra(st.dist, seeds, maxSec, 1 / walkMs);
+    st.last = { walkMs, maxSec, ox: 0, oy: 0, gridSeeds: [] };
+    return true;
+  }
+
+  /** Источники для runSeeds: все привязанные станции метро / все хабы транспорта (время 0). */
+  stationSeeds(walkMs) {
+    const out = [], inv = 1 / walkMs;
+    for (const s of this.stations) if (s) { out.push(s[0], s[1] * inv); if (s[2] >= 0) out.push(s[2], s[3] * inv); }
+    return out;
+  }
+  hubSeeds(walkMs) {
+    const out = [], inv = 1 / walkMs;
+    for (let h = 0; h < this.nh; h++) for (let j = 0; j < 2; j++) { const n = this.hubN[2 * h + j]; if (n >= 0) out.push(n, this.hubM[2 * h + j] * inv); }
+    return out;
+  }
+
   /** Углы картинки (верх-лево, верх-право, низ-право, низ-лево) для прямоугольника ячеек [x0,x1)×[y0,y1), y вверх. */
   cornersFor(x0, y0, x1, y1) {
     const X = (c) => unMercX(this.mx0 + c * CS), Y = (c) => unMercY(this.my0 + c * CS);

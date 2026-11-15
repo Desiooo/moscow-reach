@@ -1,6 +1,8 @@
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { Reach, CELL, parseStreets } from "./engine.js";
+import { PAL, VIR, lerpPal, makeScale, fmtKm, MEANS } from "./scale.js";
+import { createDistricts } from "./districts.js";
 
 const STYLE_URL = "https://tiles.openfreemap.org/styles/positron"; // бесплатная векторная карта, без ключей
 const BASE = import.meta.env.BASE_URL;
@@ -28,8 +30,10 @@ const state = {
   transit: true,
   groups: GROUPS.map(() => true),
   pace: 1,
-  view: "zone", // zone | remote | access
+  view: "zone", // zone | remote | access | districts
   aT: 60,
+  mean: "arith", // середина шкалы: arith | geo | quad
+  dMetric: "acc", dSel: null,
 };
 try {
   const o = q.get("o")?.split(",").map(Number);
@@ -38,7 +42,10 @@ try {
   if (q.get("w") === "1") state.transit = false;
   const m = q.get("m"); if (m && /^[01]{5}$/.test(m)) state.groups = [...m].map((c) => c === "1");
   if (q.has("p")) { const p = Number(q.get("p")); if (p >= 0 && p < PACES.length) state.pace = p; }
-  if (["remote", "access"].includes(q.get("v"))) state.view = q.get("v");
+  if (["remote", "access", "districts"].includes(q.get("v"))) state.view = q.get("v");
+  if (["arith", "geo", "quad"].includes(q.get("sk"))) state.mean = q.get("sk");
+  if (q.get("dm")) state.dMetric = q.get("dm");
+  if (q.has("d")) { const d = Number(q.get("d")); if (Number.isFinite(d)) state.dSel = d; }
   if (q.has("a")) { const a = Number(q.get("a")); if (a >= 10 && a <= 120) state.aT = Math.round(a / 10) * 10; }
 } catch {}
 
@@ -61,8 +68,6 @@ if (import.meta.env.DEV) window.__map = map;
 // ---------- вспомогательное ----------
 const $ = (id) => document.getElementById(id);
 const BLANK = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
-const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
-const fmtKm = (v) => (v < 10 ? v.toFixed(1) : Math.round(v).toLocaleString("ru"));
 const fmtMin = (m) => (m >= 60 ? `${Math.floor(m / 60)} ч ${Math.round(m % 60)} мин` : `${Math.round(m)} мин`);
 
 function mkChip(parent, label, pressed, onClick) {
@@ -73,13 +78,6 @@ function mkChip(parent, label, pressed, onClick) {
   return b;
 }
 
-// палитры: зона — «близко → далеко»; удалённость и доступность — viridis
-const PAL = ["#0b3c5d", "#1d6a8a", "#2fa4a0", "#8fd18a", "#f4e285"].map(hex);
-const VIR = ["#fde725", "#b5de2b", "#6ece58", "#35b779", "#1f9e89", "#26828e", "#31688e", "#3e4989", "#482878", "#440154"].map(hex); // ярко → тёмно
-function lerpPal(pal, x) { // x ∈ [0,1]
-  const p = Math.max(0, Math.min(1, x)) * (pal.length - 1), a = Math.floor(p), b = Math.min(pal.length - 1, a + 1), f = p - a;
-  return pal[a].map((v, k) => Math.round(v + (pal[b][k] - v) * f));
-}
 function bandStep(minutes) { for (const s of [5, 10, 15, 20, 30]) if (minutes / s <= 6) return s; return 30; }
 
 /**
@@ -125,7 +123,7 @@ function pushImage(cv, sourceId, coords) {
   });
 }
 
-let reach = null, pin = null, centerMarker = null, worker = null, stations = [];
+let reach = null, pin = null, centerMarker = null, worker = null, stations = [], dist = null;
 let needRun = true, timer = 0;
 
 // ---------- UI: вкладки, переключатели ----------
@@ -142,6 +140,11 @@ $("slider").oninput = () => { state.minutes = Number($("slider").value); changed
 $("aSlider").value = state.aT;
 $("aSlider").oninput = () => { state.aT = Number($("aSlider").value); renderAccess(); syncUrl(); };
 for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => setView(b.dataset.v);
+const scaleBtns = MEANS.map((m) => mkChip($("scaleChips"), m.name, m.id === state.mean, () => {
+  state.mean = m.id; scaleBtns.forEach((b, j) => b.setAttribute("aria-pressed", MEANS[j].id === state.mean));
+  if (state.view === "access") renderAccess(); else if (state.view === "districts") dist?.render();
+  syncUrl();
+}));
 
 function paramsChanged() { // поменялись транспорт/темп
   if (state.view === "zone") changed(true);
@@ -154,14 +157,16 @@ function applyView() {
   $("bWalk").setAttribute("aria-pressed", !state.transit);
   $("bTransit").setAttribute("aria-pressed", state.transit);
   $("vZone").hidden = v !== "zone"; $("vRemote").hidden = v !== "remote"; $("vAccess").hidden = v !== "access";
+  $("vDistricts").hidden = v !== "districts"; $("districtsStats").hidden = v !== "districts";
+  $("scaleBox").hidden = !(v === "access" || v === "districts");
   $("zoneStats").hidden = v !== "zone"; $("remoteStats").hidden = v !== "remote"; $("accessStats").hidden = v !== "access";
   $("transitOpts").hidden = !((v === "zone" && state.transit) || v === "remote");
-  $("paceBox").hidden = v === "access";
+  $("paceBox").hidden = v === "access" || v === "districts";
   $("hintZone").hidden = v !== "zone";
   $("tip").style.display = "none";
   if (map.getLayer("reach")) {
     map.setLayoutProperty("reach", "visibility", v === "zone" ? "visible" : "none");
-    map.setLayoutProperty("heat", "visibility", v === "zone" ? "none" : "visible");
+    map.setLayoutProperty("heat", "visibility", v === "remote" || v === "access" ? "visible" : "none");
   }
   if (pin) pin.getElement().style.display = v === "zone" ? "" : "none";
   if (centerMarker) centerMarker.getElement().style.display = v === "remote" ? "" : "none";
@@ -171,9 +176,11 @@ function applyView() {
 function setView(v) {
   state.view = v; applyView(); syncUrl();
   if (!reach) return;
+  if (v !== "districts") dist?.hide();
   if (v === "zone") changed(false);
   else if (v === "remote") loadRemote();
-  else loadAccess();
+  else if (v === "access") loadAccess();
+  else dist?.show();
 }
 
 // ---------- режим «Зона» ----------
@@ -331,7 +338,7 @@ function renderRemote() {
 }
 
 // ---------- режим «Доступность» ----------
-let access = null, accessTried = false, vals = null, accLo = 0, accHi = 1;
+let access = null, accessTried = false, vals = null;
 async function loadAccess() {
   if (!access && !accessTried) {
     accessTried = true;
@@ -371,9 +378,9 @@ function renderAccess() {
   const moscow = [];
   for (const p of access.pts) { const v = p[3 + ti]; a[p[1] * nx + p[0]] = v; if (p[2]) moscow.push({ v, ix: p[0], iy: p[1] }); }
   vals = { a, nx, ny };
-  const sorted = moscow.map((m) => m.v).sort((x, y) => x - y);
-  const pct = (f) => sorted[Math.min(sorted.length - 1, Math.floor(f * sorted.length))];
-  accLo = pct(0.03); accHi = Math.max(accLo + 1, pct(0.97));
+  const allVals = access.pts.map((p) => p[3 + ti]), mosVals = moscow.map((m) => m.v);
+  const sc = makeScale(allVals, state.mean, mosVals); // от самого малого до самого большого значения, без «среза»
+  const sorted = mosVals.slice().sort((x, y) => x - y);
   // картинка: грубая сетка (4 ячейки на пиксель), мягкая интерполяция между стартами; реки пустые
   const R = 4, cwid = Math.ceil(reach.W / R), chei = Math.ceil(reach.H / R);
   heatCv.canvas.width = cwid; heatCv.canvas.height = chei;
@@ -384,14 +391,16 @@ function renderAccess() {
       const cx = (X + 0.5) * R, cy = (Y + 0.5) * R, ci = Math.floor(cy) * W + Math.floor(cx);
       if (!cov[ci] || barrier[ci]) continue;
       const v = sampleAccess(cx, cy); if (v == null) continue;
-      const c = lerpPal(VIR, 1 - (v - accLo) / (accHi - accLo)); // больше площадь → ярче
+      const c = lerpPal(VIR, 1 - sc.f(v)); // больше площадь → ярче
       const o = (row + X) * 4; d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 175;
     }
   }
   heatCv.ctx.putImageData(img, 0, 0);
   pushImage(heatCv, "heat", reach.corners);
-  $("aLegend").style.background = `linear-gradient(90deg, rgb(${VIR[9]}), rgb(${VIR[5]}), rgb(${VIR[0]}))`;
-  $("aLo").textContent = `${fmtKm(accLo)} км²`; $("aHi").textContent = `${fmtKm(accHi)} км² и больше`;
+  $("aLegend").style.background = `linear-gradient(90deg, ${[1, 0.75, 0.5, 0.25, 0].map((x) => `rgb(${lerpPal(VIR, x)})`).join(",")})`;
+  const mname = MEANS.find((x) => x.id === state.mean).short;
+  $("aLo").textContent = `${fmtKm(sc.min)} км²`; $("aMid").textContent = `${mname} ${fmtKm(sc.mid)}`; $("aHi").textContent = `${fmtKm(sc.max)} км²`;
+  $("scaleInfo").textContent = `Среднее по Москве: арифм. ${fmtKm(sc.arith)} · геом. ${fmtKm(sc.geo)} · квадр. ${fmtKm(sc.quad)} км²`;
   const mean = sorted.reduce((s, v) => s + v, 0) / sorted.length, best = sorted[sorted.length - 1], worst = sorted[0];
   $("aSummary").innerHTML = `В среднем по Москве: <b>${fmtKm(mean)} км²</b> · от ${fmtKm(worst)} до ${fmtKm(best)}`;
   // рейтинги
@@ -424,9 +433,11 @@ function renderAccess() {
 function syncUrl() {
   const p = new URLSearchParams();
   if (state.view !== "zone") p.set("v", state.view);
+  if (state.mean !== "arith") p.set("sk", state.mean);
+  if (state.view === "districts") { p.set("dm", state.dMetric); if (state.dSel != null) p.set("d", state.dSel); }
   p.set("o", `${state.lat.toFixed(5)},${state.lon.toFixed(5)}`);
   p.set("t", state.minutes);
-  if (state.view === "access") p.set("a", state.aT);
+  if (state.view === "access" || (state.view === "districts" && state.dMetric === "acc")) p.set("a", state.aT);
   if (!state.transit) p.set("w", 1);
   if (state.groups.some((g) => !g)) p.set("m", state.groups.map((g) => (g ? 1 : 0)).join(""));
   if (state.pace !== 1) p.set("p", state.pace);
@@ -507,6 +518,8 @@ map.on("load", async () => {
   const chip = $("chipMetro");
   chip.onclick = () => { const on = chip.getAttribute("aria-pressed") !== "true"; chip.setAttribute("aria-pressed", on); for (const id of METRO_LAYERS) map.setLayoutProperty(id, "visibility", on ? "visible" : "none"); };
 
+  dist = createDistricts({ map, $, state, BASE, beforeId: "metro-casing", getMean: () => state.mean, onChange: syncUrl });
+
   const el = document.createElement("div"); el.className = "pin";
   pin = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([state.lon, state.lat]).addTo(map);
   pin.on("dragend", () => { const p = pin.getLngLat(); setOrigin(p.lng, p.lat); });
@@ -526,5 +539,5 @@ map.on("load", async () => {
 
   $("busy").style.display = "none";
   applyView();
-  if (state.view === "zone") update(); else if (state.view === "access") loadAccess(); else loadRemote(); // сообщения воркеру встают в очередь за init
+  if (state.view === "zone") update(); else if (state.view === "access") loadAccess(); else if (state.view === "districts") dist.show(); else loadRemote(); // сообщения воркеру встают в очередь за init
 });

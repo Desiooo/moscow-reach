@@ -1,0 +1,165 @@
+// Районы Москвы: границы (GeoJSON) и статистика по каждому.
+// usage: node scripts/build-districts.mjs <publicDir> <rawDir> <outFile>
+import fs from 'node:fs';
+import zlib from 'node:zlib';
+import { Reach, parseStreets, CELL } from '../engine.js';
+
+const [dir, raw, outFile] = process.argv.slice(2);
+const WALK = 5000 / 3600;
+const CENTER = [37.6208, 55.7539];
+
+const un = (f) => { const b = zlib.gunzipSync(fs.readFileSync(`${dir}/${f}`)); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); };
+const net = JSON.parse(fs.readFileSync(`${dir}/network.json`, 'utf8'));
+const metro = JSON.parse(fs.readFileSync(`${dir}/metro.json`, 'utf8'));
+const access = JSON.parse(fs.readFileSync(`${dir}/access.json`, 'utf8'));
+const reach = new Reach(net, parseStreets(un('streets.bin.gz')), new Uint8Array(un('barrier.bin.gz')), un('cover.bin.gz'), un('moscow.bin.gz'));
+const { W, H } = reach;
+const stationsAll = metro.features.filter((f) => f.properties.kind === 'station');
+const metroSt = stationsAll.filter((f) => f.properties.metro === true);
+reach.setStations(metroSt.map((f) => f.geometry.coordinates));
+
+// ---- районы и округа
+const rels = JSON.parse(fs.readFileSync(`${raw}/districts.json`, 'utf8')).elements;
+const okrugRels = JSON.parse(fs.readFileSync(`${raw}/okrugs.json`, 'utf8')).elements;
+const OK = { 'Центральный': 'ЦАО', 'Северный': 'САО', 'Северо-Восточный': 'СВАО', 'Восточный': 'ВАО', 'Юго-Восточный': 'ЮВАО', 'Южный': 'ЮАО', 'Юго-Западный': 'ЮЗАО', 'Западный': 'ЗАО', 'Северо-Западный': 'СЗАО', 'Зеленоградский': 'ЗелАО', 'Новомосковский': 'НАО', 'Троицкий': 'ТАО' };
+const okrugOf = new Map();
+for (const o of okrugRels) {
+  const short = OK[(o.tags.name || '').replace(' административный округ', '')] || o.tags.name;
+  for (const m of o.members) if (m.type === 'relation') okrugOf.set(m.ref, short);
+}
+const ZEL = ['Матушкино', 'Савёлки', 'Старое Крюково', 'Силино', 'Крюково'];
+
+const same = (a, b) => Math.abs(a[0] - b[0]) < 1e-9 && Math.abs(a[1] - b[1]) < 1e-9;
+function rings(rel) {
+  const ways = rel.members.filter((m) => m.type === 'way' && m.geometry).map((m) => m.geometry.map((q) => [q.lon, q.lat]));
+  const out = [];
+  while (ways.length) {
+    let ring = ways.pop(), grew = true;
+    while (grew && !same(ring[0], ring[ring.length - 1])) {
+      grew = false;
+      for (let i = 0; i < ways.length; i++) {
+        const w = ways[i], e = ring[ring.length - 1];
+        if (same(w[0], e)) { ring = ring.concat(w.slice(1)); ways.splice(i, 1); grew = true; break; }
+        if (same(w[w.length - 1], e)) { ring = ring.concat(w.slice(0, -1).reverse()); ways.splice(i, 1); grew = true; break; }
+      }
+    }
+    if (ring.length > 3 && same(ring[0], ring[ring.length - 1])) out.push(ring);
+  }
+  return out;
+}
+const TOL = 5 / 111000;
+function dp(pts, lo, hi, keep) {
+  let md = 0, mi = -1; const [ax, ay] = pts[lo], [bx, by] = pts[hi], dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy) || 1e-12;
+  for (let i = lo + 1; i < hi; i++) { const d = Math.abs((pts[i][0] - ax) * dy - (pts[i][1] - ay) * dx) / L; if (d > md) { md = d; mi = i; } }
+  if (md > TOL && mi > 0) { keep[mi] = 1; dp(pts, lo, mi, keep); dp(pts, mi, hi, keep); }
+}
+const simp = (r) => { const keep = new Uint8Array(r.length), mid = r.length >> 1; keep[0] = keep[mid] = keep[r.length - 1] = 1; dp(r, 0, mid, keep); dp(r, mid, r.length - 1, keep); const o = r.filter((_, i) => keep[i]).map(([x, y]) => [Math.round(x * 1e5) / 1e5, Math.round(y * 1e5) / 1e5]); return o.length >= 4 ? o : null; };
+
+const districts = [];
+for (const rel of rels) {
+  const rs = rings(rel); if (!rs.length) continue;
+  const cellRings = rs.map((r) => r.map(([lo, la]) => reach.lonLatToCell(lo, la)));
+  let area = 0; for (const r of cellRings) { let a = 0; for (let i = 0; i < r.length - 1; i++) a += r[i][0] * r[i + 1][1] - r[i + 1][0] * r[i][1]; area += Math.abs(a) / 2; }
+  const full = rel.tags.name || '?';
+  districts.push({ rel, rings: rs, cellRings, polyArea: area, full, name: full.replace(/^район /, '').replace(/ район$/, '') });
+}
+districts.sort((a, b) => b.polyArea - a.polyArea); // крупные первыми, мелкие рисуются поверх (анклавы)
+districts.forEach((d, i) => { d.id = i + 1; d.okrug = okrugOf.get(d.rel.id) || (ZEL.includes(d.name) ? 'ЗелАО' : '—'); });
+
+// ---- растр районов (метки), чётно-нечётная заливка
+const label = new Uint8Array(W * H);
+for (const d of districts) {
+  let ymin = Infinity, ymax = -Infinity;
+  for (const r of d.cellRings) for (const q of r) { ymin = Math.min(ymin, q[1]); ymax = Math.max(ymax, q[1]); }
+  for (let y = Math.max(0, Math.floor(ymin)); y <= Math.min(H - 1, Math.floor(ymax)); y++) {
+    const yc = y + 0.5, xs = [];
+    for (const r of d.cellRings) for (let i = 0; i < r.length - 1; i++) { const a = r[i], b = r[i + 1]; if ((a[1] <= yc && b[1] > yc) || (b[1] <= yc && a[1] > yc)) xs.push(a[0] + ((yc - a[1]) / (b[1] - a[1])) * (b[0] - a[0])); }
+    xs.sort((m, n) => m - n);
+    for (let i = 0; i + 1 < xs.length; i += 2) for (let x = Math.max(0, Math.ceil(xs[i] - 0.5)); x <= Math.min(W - 1, Math.floor(xs[i + 1] - 0.5)); x++) label[y * W + x] = d.id;
+  }
+}
+const N = districts.length;
+const cellKm2 = (CELL * CELL) / 1e6;
+const cnt = new Float64Array(N + 1), sx = new Float64Array(N + 1), sy = new Float64Array(N + 1), barr = new Float64Array(N + 1);
+for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const l = label[y * W + x]; if (!l) continue; cnt[l]++; sx[l] += x; sy[l] += y; if (reach.barrier[y * W + x]) barr[l]++; }
+console.log('районов', N, 'клеток в районах', cnt.reduce((a, b) => a + b, 0));
+
+// ---- улицы, остановки, станции
+const streetM = new Float64Array(N + 1);
+for (let k = 0; k < reach.eu.length; k++) {
+  const u = reach.eu[k], v = reach.ev[k];
+  const mx = (reach.gx[u] + reach.gx[v]) / 2, my = (reach.gy[u] + reach.gy[v]) / 2;
+  const l = label[Math.floor(my) * W + Math.floor(mx)]; if (l) streetM[l] += Math.hypot(reach.gx[u] - reach.gx[v], reach.gy[u] - reach.gy[v]) * CELL;
+}
+const hubs = new Float64Array(N + 1);
+for (let h = 0; h < reach.nh; h++) { const l = label[Math.floor(reach.hy[h]) * W + Math.floor(reach.hx[h])]; if (l) hubs[l]++; }
+const stMetro = new Float64Array(N + 1), stMcd = new Float64Array(N + 1);
+for (const f of stationsAll) { const [cx, cy] = reach.lonLatToCell(...f.geometry.coordinates); const l = label[Math.floor(cy) * W + Math.floor(cx)]; if (l) (f.properties.metro ? stMetro : stMcd)[l]++; }
+
+// ---- доступность: среднее по стартовым точкам внутри района (из access.json)
+const nT = 12, accSum = Array.from({ length: N + 1 }, () => new Float64Array(nT)), accN = new Float64Array(N + 1);
+const SP = access.sp;
+for (const p of access.pts) {
+  const cx = (p[0] + 0.5) * SP, cy = (p[1] + 0.5) * SP, l = label[Math.floor(cy) * W + Math.floor(cx)]; if (!l) continue;
+  accN[l]++; for (let k = 0; k < nT; k++) accSum[l][k] += p[3 + k];
+}
+for (const d of districts) if (accN[d.id] === 0) { // крошечный район без стартовых точек — берём ближайшую
+  const cx = sx[d.id] / cnt[d.id], cy = sy[d.id] / cnt[d.id]; let best = null, bd = 1e18;
+  for (const p of access.pts) { const dd = ((p[0] + 0.5) * SP - cx) ** 2 + ((p[1] + 0.5) * SP - cy) ** 2; if (dd < bd) { bd = dd; best = p; } }
+  accN[d.id] = 1; for (let k = 0; k < nT; k++) accSum[d.id][k] = best[3 + k]; d.accFallback = true;
+}
+
+// ---- время до центра (от Красной площади, весь транспорт, 5 км/ч)
+const ALL = [true, true, true, true, true, true];
+reach.run(CENTER[0], CENTER[1], { walkMs: WALK, modes: ALL, maxSec: 9000 }, 2);
+let best = reach.raster(9000, 2);
+const BINS = 151;
+const hist = Array.from({ length: N + 1 }, () => new Float64Array(BINS + 1)); // по минутам, последняя — «дальше»
+for (let i = 0; i < W * H; i++) { const l = label[i]; if (!l) continue; const t = best[i]; const m = t === Infinity ? BINS : Math.min(BINS, Math.floor(t / 60)); hist[l][m]++; }
+console.log('время до центра посчитано');
+
+// ---- пешком до ближайшей станции метро / остановки любого транспорта
+function walkField(seeds, budget) {
+  reach.runSeeds(seeds, { walkMs: WALK, maxSec: budget }, 1);
+  const b = reach.raster(budget, 1);
+  return b;
+}
+const mw = walkField(reach.stationSeeds(WALK), 3600);
+const metroWalk = { mean: new Float64Array(N + 1), w10: new Float64Array(N + 1), w15: new Float64Array(N + 1) };
+for (let i = 0; i < W * H; i++) { const l = label[i]; if (!l) continue; const t = mw[i]; metroWalk.mean[l] += Math.min(1800, t === Infinity ? 1800 : t); if (t <= 600) metroWalk.w10[l]++; if (t <= 900) metroWalk.w15[l]++; }
+const sw = walkField(reach.hubSeeds(WALK), 1800);
+const stopWalk = { mean: new Float64Array(N + 1), w5: new Float64Array(N + 1) };
+for (let i = 0; i < W * H; i++) { const l = label[i]; if (!l) continue; const t = sw[i]; stopWalk.mean[l] += Math.min(1200, t === Infinity ? 1200 : t); if (t <= 300) stopWalk.w5[l]++; }
+console.log('пешие поля посчитаны');
+
+// ---- сборка
+const r1 = (v) => Math.round(v * 10) / 10, r2 = (v) => Math.round(v * 100) / 100;
+const features = [];
+for (const d of districts) {
+  const id = d.id, n = cnt[id]; if (!n) continue;
+  const km2 = n * cellKm2;
+  // перцентили времени до центра
+  const h = hist[id], pct = (f) => { let c = 0; for (let m = 0; m < BINS; m++) { c += h[m]; if (c >= f * n) return m + 0.5; } return null; };
+  let sum = 0, reached = 0; for (let m = 0; m < BINS; m++) { sum += (m + 0.5) * h[m]; reached += h[m]; }
+  const bands = []; for (let b = 0; b < 10; b++) { let c = 0; for (let m = b * 15; m < (b + 1) * 15; m++) c += h[m]; bands.push(r2(c / n)); } bands.push(r2(Math.max(0, 1 - bands.reduce((a, c) => a + c, 0))));
+  const polys = d.rings.map(simp).filter(Boolean);
+  if (!polys.length) continue;
+  const cx = sx[id] / n, cy = sy[id] / n, [clon, clat] = reach.cornersFor(cx, cy, cx, cy)[0];
+  features.push({
+    type: 'Feature',
+    properties: {
+      id, name: d.name, full: d.full, okrug: d.okrug, c: [Math.round(clon * 1e4) / 1e4, Math.round(clat * 1e4) / 1e4],
+      area: r1(km2), water: r2(barr[id] / n),
+      metro: stMetro[id], mcd: stMcd[id], stops: hubs[id], streetKm: r1(streetM[id] / 1000),
+      acc: Array.from(accSum[id], (v) => Math.round(v / accN[id])), accN: accN[id],
+      toCenter: { mean: reached ? r1(sum / reached) : null, p50: pct(0.5), p90: pct(0.9), reached: r2(reached / n), bands },
+      metroWalk: { mean: r1(metroWalk.mean[id] / n / 60), w10: r2(metroWalk.w10[id] / n), w15: r2(metroWalk.w15[id] / n) },
+      stopWalk: { mean: r1(stopWalk.mean[id] / n / 60), w5: r2(stopWalk.w5[id] / n) },
+    },
+    geometry: { type: 'MultiPolygon', coordinates: polys.map((r) => [r]) },
+  });
+}
+fs.writeFileSync(outFile, JSON.stringify({ type: 'FeatureCollection', features }));
+console.log('районов в файле', features.length, 'байт', fs.statSync(outFile).size, 'без округа', features.filter((f) => f.properties.okrug === '—').length);
+const f0 = features.find((f) => f.properties.name === 'Тверской') || features[0];
+console.log(JSON.stringify(f0.properties));
