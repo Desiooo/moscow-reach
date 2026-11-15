@@ -86,7 +86,7 @@ export function parseStreets(buf) {
 
 export class Reach {
   /** net — транспортная сеть, streets — результат parseStreets, barrierBits — распакованная маска препятствий. */
-  constructor(net, streets, barrierBits, coverBuf) {
+  constructor(net, streets, barrierBits, coverBuf, moscowBuf) {
     const b = net.bbox;
     this.mx0 = mercX(b.minLon); this.my0 = mercY(b.minLat);
     this.W = Math.ceil((mercX(b.maxLon) - this.mx0) / CS);
@@ -145,6 +145,16 @@ export class Reach {
           const ci = cy * cw + Math.floor((x * CELL) / CC);
           this.cov[y * this.W + x] = (bits[ci >> 3] >> (ci & 7)) & 1;
         }
+      }
+    }
+
+    // собственно Москва (без пригородов) — для долей и статистики
+    this.mos = new Uint8Array(this.W * this.H);
+    if (moscowBuf) {
+      const hdr = new Int32Array(moscowBuf.slice(0, 12)), cw = hdr[0], CC = hdr[2], bits = new Uint8Array(moscowBuf, 12);
+      for (let y = 0; y < this.H; y++) {
+        const cy = Math.floor((y * CELL) / CC);
+        for (let x = 0; x < this.W; x++) { const ci = cy * cw + Math.floor((x * CELL) / CC); this.mos[y * this.W + x] = (bits[ci >> 3] >> (ci & 7)) & 1; }
       }
     }
 
@@ -218,7 +228,10 @@ export class Reach {
     this.nbList = Int32Array.from(nbList);
     this.nbDist = Float32Array.from(nbDist);
     this.heap = new Heap();
-    this.dist1 = new Float64Array(M); this.dist2 = new Float64Array(M);
+    this.dist1 = new Float64Array(M);
+    // слоты расчёта: 0 — основной, 1 — сравнение «только пешком», 2 — удалённость от центра
+    this.states = [0, 1, 2].map(() => ({ dist: new Float64Array(M), last: null }));
+    this.stations = [];
   }
 
   lonLatToCell(lon, lat) {
@@ -284,10 +297,11 @@ export class Reach {
    * walkMs — скорость ходьбы по улицам, м/с. modes — 6 булевых. maxSec — отсечка.
    * Возвращает false, если рядом со стартом нет улиц.
    */
-  run(lon, lat, { walkMs, modes, maxSec }) {
+  run(lon, lat, { walkMs, modes, maxSec }, slot = 0) {
+    const st = this.states[slot];
     const inv = 1 / walkMs;
     const [ox, oy] = this.lonLatToCell(lon, lat);
-    this.last = null;
+    st.last = null;
     if (ox < 0 || oy < 0 || ox >= this.W || oy >= this.H) return false;
     const s = this.snap(ox, oy);
     const gridSeeds = []; // [индекс ячейки, время] — источники для «ходьбы по прямой» вне улиц
@@ -351,8 +365,8 @@ export class Reach {
         }
       }
     }
-    this._dijkstra(this.dist2, seeds2, maxSec, inv);
-    this.last = { walkMs, maxSec, ox, oy, gridSeeds };
+    this._dijkstra(st.dist, seeds2, maxSec, inv);
+    st.last = { walkMs, maxSec, ox, oy, gridSeeds };
     return true;
   }
 
@@ -368,8 +382,9 @@ export class Reach {
    *  с запасом на извилистость, но не через воду и пути (мосты проходимы); 4) заполнение «дыр» внутри зоны.
    * Результат: this.best, и this.bbox = {x0,x1,y0,y1} ячеек со временем ≤ budget.
    */
-  raster(budget) {
-    const { walkMs, gridSeeds } = this.last, { W, H, gx, gy, eu, ev, dist2: dist, barrier, cov } = this;
+  raster(budget, slot = 0) {
+    const st = this.states[slot], dist = st.dist;
+    const { walkMs, gridSeeds } = st.last, { W, H, gx, gy, eu, ev, barrier, cov } = this;
     if (!this.best) { this.best = new Float32Array(W * H); this.off = new Uint8Array(W * H); this.vis = new Uint8Array(W * H); this.q = new Int32Array(W * H); }
     const best = this.best, off = this.off;
     best.fill(Infinity); off.fill(255);
@@ -418,17 +433,29 @@ export class Reach {
       const r = Math.min(Math.max(W, H), Math.ceil((budget * walkMs) / DETOUR / CELL) + 2);
       const x0 = Math.max(1, minx - r), x1 = Math.min(W - 2, maxx + r), y0 = Math.max(1, miny - r), y1 = Math.min(H - 2, maxy + r);
       const k1 = (D1 * DETOUR) / walkMs, k2 = (D2 * DETOUR) / walkMs;
-      let changed = false;
-      const upd = (i, j, k) => {
-        if (cov[i] || barrier[i]) return; // внутри зоны улиц — только по улицам
-        const t = best[j] + k;
-        if (t < best[i] && t <= budget) { best[i] = t; off[i] = 254; changed = true; }
-      };
-      for (let round = 0; round < 4; round++) {
+      if (!this.noWalk) { this.noWalk = new Uint8Array(W * H); for (let i = 0; i < W * H; i++) this.noWalk[i] = cov[i] | barrier[i]; }
+      const nw = this.noWalk;
+      let changed = true;
+      for (let round = 0; round < 4 && changed; round++) {
         changed = false;
-        for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const i = y * W + x; upd(i, i - 1, k1); upd(i, i - W - 1, k2); upd(i, i - W, k1); upd(i, i - W + 1, k2); }
-        for (let y = y1; y >= y0; y--) for (let x = x1; x >= x0; x--) { const i = y * W + x; upd(i, i + 1, k1); upd(i, i + W + 1, k2); upd(i, i + W, k1); upd(i, i + W - 1, k2); }
-        if (!changed) break;
+        for (let y = y0; y <= y1; y++) for (let x = x0, i = y * W + x0; x <= x1; x++, i++) {
+          if (nw[i]) continue;
+          let t = best[i], u;
+          if ((u = best[i - 1] + k1) < t) t = u;
+          if ((u = best[i - W - 1] + k2) < t) t = u;
+          if ((u = best[i - W] + k1) < t) t = u;
+          if ((u = best[i - W + 1] + k2) < t) t = u;
+          if (t < best[i] && t <= budget) { best[i] = t; off[i] = 254; changed = true; }
+        }
+        for (let y = y1; y >= y0; y--) for (let x = x1, i = y * W + x1; x >= x0; x--, i--) {
+          if (nw[i]) continue;
+          let t = best[i], u;
+          if ((u = best[i + 1] + k1) < t) t = u;
+          if ((u = best[i + W + 1] + k2) < t) t = u;
+          if ((u = best[i + W] + k1) < t) t = u;
+          if ((u = best[i + W - 1] + k2) < t) t = u;
+          if (t < best[i] && t <= budget) { best[i] = t; off[i] = 254; changed = true; }
+        }
       }
     }
     // границы всей закрашенной области
@@ -472,5 +499,49 @@ export class Reach {
     }
     this.bbox = { x0: minx, x1: maxx + 1, y0: miny, y1: maxy + 1 };
     return best;
+  }
+
+  /** Привязать станции метро ([lon,lat,...]) к улицам — для подсчёта «сколько станций в зоне». */
+  setStations(list) {
+    this.stations = [];
+    for (const [lon, lat] of list) {
+      const [x, y] = this.lonLatToCell(lon, lat);
+      const sn = this.snap(x, y, 40);
+      this.stations.push(sn);
+    }
+  }
+
+  _timeAt(dist, n1, m1, n2, m2, inv) {
+    let t = Infinity;
+    if (n1 >= 0) t = dist[n1] + m1 * inv;
+    if (n2 >= 0) t = Math.min(t, dist[n2] + m2 * inv);
+    return t;
+  }
+
+  /** Сколько станций метро и остановок транспорта попадает в зону (по времени прихода на улицу рядом). */
+  countStops(budget, slot = 0) {
+    const st = this.states[slot], inv = 1 / st.last.walkMs, d = st.dist;
+    let stations = 0, hubs = 0;
+    for (const s of this.stations) if (s && this._timeAt(d, s[0], s[1], s[2], s[3], inv) <= budget) stations++;
+    for (let h = 0; h < this.nh; h++) if (this.hubN[2 * h] >= 0 && this._timeAt(d, this.hubN[2 * h], this.hubM[2 * h], this.hubN[2 * h + 1], this.hubM[2 * h + 1], inv) <= budget) hubs++;
+    return { stations, hubs };
+  }
+
+  /**
+   * Растр на budget секунд → гистограмма площади по времени.
+   * Возвращает { cum: км² с временем ≤ k·bin для k=1..nb, mosCum: то же внутри Москвы, mosKm2: площадь Москвы в растре }.
+   */
+  histogram(best, binSec, nb) {
+    const cnt = new Float64Array(nb + 1), mcnt = new Float64Array(nb + 1);
+    const { W, H, mos } = this, bb = this.bbox;
+    if (bb) for (let y = bb.y0; y < bb.y1; y++) for (let x = bb.x0, i = y * W + x; x < bb.x1; x++, i++) {
+      const t = best[i]; if (t === Infinity) continue;
+      const b = Math.ceil(t / binSec); if (b > nb) continue;
+      cnt[b]++; if (mos[i]) mcnt[b]++;
+    }
+    const k = (CELL * CELL) / 1e6, cum = new Float64Array(nb + 1), mcum = new Float64Array(nb + 1);
+    for (let b = 1; b <= nb; b++) { cum[b] = cum[b - 1] + cnt[b] * k; mcum[b] = mcum[b - 1] + mcnt[b] * k; }
+    if (!this.mosKm2) { let n = 0; for (let i = 0; i < mos.length; i++) n += mos[i]; this.mosKm2 = n * k; }
+    return { cum, mosCum: mcum, mosKm2: this.mosKm2 };
   }
 }

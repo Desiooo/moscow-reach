@@ -114,6 +114,7 @@ const cw = Math.ceil((GW * CELL) / CC), ch = Math.ceil((GH * CELL) / CC), city =
     xs.sort((m, n) => m - n);
     for (let i = 0; i + 1 < xs.length; i += 2) for (let x = Math.max(0, Math.ceil(xs[i] - 0.5)); x <= Math.min(cw - 1, Math.floor(xs[i + 1] - 0.5)); x++) city[y * cw + x] = 1;
   }
+  var moscowOnly = city.slice(); // только Москва, без отступа и расширений
   // отступ: квадратный максимум-фильтр
   const rr = Math.round(MARGIN_M / CC), tmp = new Uint8Array(cw * ch);
   for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) { let v = 0; for (let k = Math.max(0, x - rr); k <= Math.min(cw - 1, x + rr) && !v; k++) v = city[y * cw + k]; tmp[y * cw + x] = v; }
@@ -127,6 +128,7 @@ const cw = Math.ceil((GW * CELL) / CC), ch = Math.ceil((GH * CELL) / CC), city =
   }
   let c = 0; for (const v of city) c += v; console.log('city cells', c, '≈ km²', ((c * CC * CC) / 1e6).toFixed(0));
 }
+const moscowMask = typeof moscowOnly !== 'undefined' ? moscowOnly : null;
 const inCity = (gx, gy) => { const x = Math.floor((gridX(gx) * CELL) / CC), y = Math.floor((gridY(gy) * CELL) / CC); return x >= 0 && y >= 0 && x < cw && y < ch && city[y * cw + x] === 1; };
 
 const bridges = []; // [rings, tx, ty]
@@ -294,5 +296,9 @@ const bits = new Uint8Array(Math.ceil((GW * GH) / 8)); for (let i = 0; i < mask.
 fs.writeFileSync(`${outDir}/barrier.bin.gz`, zlib.gzipSync(Buffer.from(bits), { level: 9 }));
 const cbits = new Uint8Array(Math.ceil((cw * ch) / 8)); for (let i = 0; i < city.length; i++) if (city[i]) cbits[i >> 3] |= 1 << (i & 7);
 fs.writeFileSync(`${outDir}/cover.bin.gz`, zlib.gzipSync(Buffer.concat([Buffer.from(Int32Array.from([cw, ch, CC]).buffer), Buffer.from(cbits)]), { level: 9 }));
+{ // маска собственно Москвы (для статистики)
+  const mb = new Uint8Array(Math.ceil((cw * ch) / 8)); for (let i = 0; i < moscowMask.length; i++) if (moscowMask[i]) mb[i >> 3] |= 1 << (i & 7);
+  fs.writeFileSync(`${outDir}/moscow.bin.gz`, zlib.gzipSync(Buffer.concat([Buffer.from(Int32Array.from([cw, ch, CC]).buffer), Buffer.from(mb)]), { level: 9 }));
+}
 let blocked = 0; for (const v of mask) blocked += v;
 console.log('grid', GW, 'x', GH, 'blocked cells', blocked, 'files', fs.statSync(`${outDir}/streets.bin.gz`).size, fs.statSync(`${outDir}/barrier.bin.gz`).size);
