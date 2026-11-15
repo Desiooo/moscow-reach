@@ -3,6 +3,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { Reach, CELL, parseStreets } from "./engine.js";
 import { PAL, VIR, lerpPal, makeScale, fmtKm, MEANS } from "./scale.js";
 import { createDistricts } from "./districts.js";
+import { createPopulation } from "./population.js";
 
 const STYLE_URL = "https://tiles.openfreemap.org/styles/positron"; // бесплатная векторная карта, без ключей
 const BASE = import.meta.env.BASE_URL;
@@ -30,7 +31,8 @@ const state = {
   transit: true,
   groups: GROUPS.map(() => true),
   pace: 1,
-  view: "zone", // zone | remote | access | districts
+  view: "zone", // zone | remote | access | districts | pop
+  ps: 2, // сглаживание населения
   aT: 60,
   mean: "arith", // середина шкалы: arith | geo | quad
   dMetric: "acc", dSel: null,
@@ -42,7 +44,8 @@ try {
   if (q.get("w") === "1") state.transit = false;
   const m = q.get("m"); if (m && /^[01]{5}$/.test(m)) state.groups = [...m].map((c) => c === "1");
   if (q.has("p")) { const p = Number(q.get("p")); if (p >= 0 && p < PACES.length) state.pace = p; }
-  if (["remote", "access", "districts"].includes(q.get("v"))) state.view = q.get("v");
+  if (["remote", "access", "districts", "pop"].includes(q.get("v"))) state.view = q.get("v");
+  if (q.has("ps")) { const ps = Number(q.get("ps")); if (ps >= 0 && ps <= 3) state.ps = ps; }
   if (["arith", "geo", "quad"].includes(q.get("sk"))) state.mean = q.get("sk");
   if (q.get("dm")) state.dMetric = q.get("dm");
   if (q.has("d")) { const d = Number(q.get("d")); if (Number.isFinite(d)) state.dSel = d; }
@@ -123,7 +126,7 @@ function pushImage(cv, sourceId, coords) {
   });
 }
 
-let reach = null, pin = null, centerMarker = null, worker = null, stations = [], dist = null;
+let reach = null, pin = null, centerMarker = null, worker = null, stations = [], dist = null, popMod = null, popGrid = null;
 let needRun = true, timer = 0;
 
 // ---------- UI: вкладки, переключатели ----------
@@ -142,7 +145,7 @@ $("aSlider").oninput = () => { state.aT = Number($("aSlider").value); renderAcce
 for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => setView(b.dataset.v);
 const scaleBtns = MEANS.map((m) => mkChip($("scaleChips"), m.name, m.id === state.mean, () => {
   state.mean = m.id; scaleBtns.forEach((b, j) => b.setAttribute("aria-pressed", MEANS[j].id === state.mean));
-  if (state.view === "access") renderAccess(); else if (state.view === "districts") dist?.render();
+  if (state.view === "access") renderAccess(); else if (state.view === "districts") dist?.render(); else if (state.view === "pop") popMod?.render();
   syncUrl();
 }));
 
@@ -158,15 +161,16 @@ function applyView() {
   $("bTransit").setAttribute("aria-pressed", state.transit);
   $("vZone").hidden = v !== "zone"; $("vRemote").hidden = v !== "remote"; $("vAccess").hidden = v !== "access";
   $("vDistricts").hidden = v !== "districts"; $("districtsStats").hidden = v !== "districts";
-  $("scaleBox").hidden = !(v === "access" || v === "districts");
+  $("vPop").hidden = v !== "pop"; $("popStats").hidden = v !== "pop";
+  $("scaleBox").hidden = !(v === "access" || v === "districts" || v === "pop");
   $("zoneStats").hidden = v !== "zone"; $("remoteStats").hidden = v !== "remote"; $("accessStats").hidden = v !== "access";
   $("transitOpts").hidden = !((v === "zone" && state.transit) || v === "remote");
-  $("paceBox").hidden = v === "access" || v === "districts";
+  $("paceBox").hidden = v === "access" || v === "districts" || v === "pop";
   $("hintZone").hidden = v !== "zone";
   $("tip").style.display = "none";
   if (map.getLayer("reach")) {
     map.setLayoutProperty("reach", "visibility", v === "zone" ? "visible" : "none");
-    map.setLayoutProperty("heat", "visibility", v === "remote" || v === "access" ? "visible" : "none");
+    map.setLayoutProperty("heat", "visibility", v === "remote" || v === "access" || v === "pop" ? "visible" : "none");
   }
   if (pin) pin.getElement().style.display = v === "zone" ? "" : "none";
   if (centerMarker) centerMarker.getElement().style.display = v === "remote" ? "" : "none";
@@ -180,7 +184,8 @@ function setView(v) {
   if (v === "zone") changed(false);
   else if (v === "remote") loadRemote();
   else if (v === "access") loadAccess();
-  else dist?.show();
+  else if (v === "districts") dist?.show();
+  else popMod?.render();
 }
 
 // ---------- режим «Зона» ----------
@@ -191,6 +196,13 @@ function changed(rerun) {
 }
 
 const scratch = { buf: null };
+function popInZone(best, budget, bb) { // сумма жителей по ячейкам зоны (население ячейки 120 м делим на 16 ячеек по 30 м)
+  const { W } = reach, { w, r, a } = popGrid, k = 1 / (r * r);
+  if (popGrid.mosTotal == null) { let t = 0; for (let Y = 0; Y < popGrid.h; Y++) for (let X = 0; X < w; X++) if (reach.mos[Math.min(reach.H - 1, Y * r + 2) * W + Math.min(W - 1, X * r + 2)]) t += a[Y * w + X]; popGrid.mosTotal = t; }
+  let total = 0, mos = 0;
+  if (bb) for (let y = bb.y0; y < bb.y1; y++) for (let x = bb.x0, i = y * W + x; x < bb.x1; x++, i++) if (best[i] <= budget) { const p = a[Math.floor(y / r) * w + Math.floor(x / r)] * k; total += p; if (reach.mos[i]) mos += p; }
+  return { total, mos, mosTotal: popGrid.mosTotal };
+}
 function update() {
   if (!reach || state.view !== "zone") return;
   const t0 = performance.now();
@@ -240,6 +252,9 @@ function update() {
   $("tShare").textContent = h.mosKm2 ? `${Math.min(100, (h.mosCum[1] / h.mosKm2) * 100).toFixed(h.mosCum[1] / h.mosKm2 < 0.1 ? 1 : 0)}%`.replace(".", ",") : "—";
   const sc = reach.countStops(budget, 0);
   $("tStations").textContent = `${sc.stations}`; $("tHubs").textContent = sc.hubs.toLocaleString("ru");
+  const pz = popInZone(best, budget, bb);
+  $("tPop").textContent = pz.total >= 1e6 ? `${(pz.total / 1e6).toFixed(1).replace(".", ",")} млн` : `${Math.round(pz.total / 1e3)} тыс.`;
+  $("tPopShare").textContent = pz.mosTotal ? `${Math.round((pz.mos / pz.mosTotal) * 100)}%` : "—";
   drawZoneChart();
   syncUrl();
   if (import.meta.env.DEV) console.log(`update ${Math.round(performance.now() - t0)} мс, ${cells} ячеек`);
@@ -433,6 +448,7 @@ function renderAccess() {
 function syncUrl() {
   const p = new URLSearchParams();
   if (state.view !== "zone") p.set("v", state.view);
+  if (state.view === "pop" && state.ps !== 2) p.set("ps", state.ps);
   if (state.mean !== "arith") p.set("sk", state.mean);
   if (state.view === "districts") { p.set("dm", state.dMetric); if (state.dSel != null) p.set("d", state.dSel); }
   p.set("o", `${state.lat.toFixed(5)},${state.lon.toFixed(5)}`);
@@ -463,19 +479,22 @@ map.on("load", async () => {
     if (head[0] !== 0x1f || head[1] !== 0x8b) return buf;
     return new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
   };
-  const [net, streetsBuf, barrierBuf, coverBuf, moscowBuf, metro] = await Promise.all([
+  const [net, streetsBuf, barrierBuf, coverBuf, moscowBuf, metro, popBuf] = await Promise.all([
     fetch(`${BASE}network.json`).then((r) => r.json()),
     gunzip(`${BASE}streets.bin.gz`),
     gunzip(`${BASE}barrier.bin.gz`),
     gunzip(`${BASE}cover.bin.gz`),
     gunzip(`${BASE}moscow.bin.gz`),
     fetch(`${BASE}metro.json`).then((r) => r.json()),
+    gunzip(`${BASE}pop.bin.gz`),
   ]);
   $("busy").textContent = "Строю граф улиц…";
   await new Promise((r) => setTimeout(r, 30)); // дать перерисоваться подписи
   reach = new Reach(net, parseStreets(streetsBuf), new Uint8Array(barrierBuf), coverBuf, moscowBuf);
   stations = metro.features.filter((f) => f.properties.kind === "station" && f.properties.metro === true).map((f) => ({ name: f.properties.name, lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] }));
   reach.setStations(stations.map((s) => [s.lon, s.lat]));
+
+  { const hdr = new Int32Array(popBuf.slice(0, 12)); popGrid = { w: hdr[0], h: hdr[1], r: hdr[2], a: new Float32Array(popBuf.slice(12)) }; }
 
   // воркер с собственной копией движка для тяжёлых расчётов (буферы передаём ему)
   try {
@@ -518,6 +537,7 @@ map.on("load", async () => {
   const chip = $("chipMetro");
   chip.onclick = () => { const on = chip.getAttribute("aria-pressed") !== "true"; chip.setAttribute("aria-pressed", on); for (const id of METRO_LAYERS) map.setLayoutProperty(id, "visibility", on ? "visible" : "none"); };
 
+  popMod = createPopulation({ map, $, state, reach, pop: popGrid, pushImage, heatCv, stationNear, getMean: () => state.mean, onChange: syncUrl });
   dist = createDistricts({ map, $, state, BASE, beforeId: "metro-casing", getMean: () => state.mean, onChange: syncUrl });
 
   const el = document.createElement("div"); el.className = "pin";
@@ -539,5 +559,5 @@ map.on("load", async () => {
 
   $("busy").style.display = "none";
   applyView();
-  if (state.view === "zone") update(); else if (state.view === "access") loadAccess(); else if (state.view === "districts") dist.show(); else loadRemote(); // сообщения воркеру встают в очередь за init
+  if (state.view === "zone") update(); else if (state.view === "access") loadAccess(); else if (state.view === "districts") dist.show(); else if (state.view === "pop") popMod.render(); else loadRemote(); // сообщения воркеру встают в очередь за init
 });

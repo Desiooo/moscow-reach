@@ -3,6 +3,8 @@ import { VIR, lerpPal, rgbHex, makeScale, fmtKm, MEANS } from "./scale.js";
 
 const T_MIN = 10;
 const fmt1 = (v) => (v >= 100 ? Math.round(v).toLocaleString("ru") : v.toFixed(1).replace(".", ","));
+const fmtPop = (v) => (v >= 1e6 ? `${(v / 1e6).toFixed(2).replace(".", ",")} млн` : v >= 1e3 ? `${Math.round(v / 1e3)} тыс.` : `${Math.round(v)}`);
+const fmtDens = (v) => `${Math.round(v).toLocaleString("ru")} /км²`;
 const fmtMin = (v) => (v == null ? "> 2,5 ч" : v >= 60 ? `${Math.floor(v / 60)} ч ${Math.round(v % 60)} мин` : `${Math.round(v)} мин`);
 
 // good: 'high' — чем больше, тем лучше (ярче); 'low' — чем меньше, тем лучше; 'none' — просто размер
@@ -12,6 +14,9 @@ const METRICS = [
   { id: "metro", name: "Пешком до метро", unit: "мин", good: "low", get: (p) => p.metroWalk.mean, fmt: (v) => `${fmt1(v)} мин`, hint: "Средняя пешая дорога до ближайшей станции метро или МЦК (по улицам; места дальше 30 мин считаются за 30)." },
   { id: "stops", name: "Остановок на км²", unit: "ост./км²", good: "high", get: (p) => p.stops / p.area, fmt: (v) => `${fmt1(v)} /км²`, hint: "Плотность остановок и станций общественного транспорта." },
   { id: "street", name: "Плотность улиц", unit: "км/км²", good: "high", get: (p) => p.streetKm / p.area, fmt: (v) => `${fmt1(v)} км/км²`, hint: "Километров улиц, дорожек и троп на квадратный километр (по OpenStreetMap)." },
+  { id: "pop", chip: "Население", name: "Население", unit: "чел.", good: "none", agg: "sum", get: (p) => p.pop, fmt: fmtPop, hint: "Число жителей (оценка GHSL на 2020 год, сетка около 90 м)." },
+  { id: "dens", chip: "Плотность населения", name: "Плотность населения", unit: "чел./км²", good: "none", get: (p) => p.dens, fmt: fmtDens, hint: "Жителей на квадратный километр района." },
+  { id: "popm", chip: "Жители у метро", name: "Жителей ≤ 10 мин пешком от метро", unit: "%", good: "high", get: (p) => (p.popM10 ?? 0) * 100, fmt: (v) => `${Math.round(v)}%`, hint: "Какая доля жителей района живёт не дальше 10 минут пешком (по улицам) от станции метро или МЦК." },
   { id: "area", name: "Площадь", unit: "км²", good: "none", get: (p) => p.area, fmt: (v) => `${fmtKm(v)} км²`, hint: "Площадь района." },
 ];
 
@@ -111,6 +116,9 @@ export function createDistricts({ map, $, state, BASE, beforeId, getMean, onChan
   function drawOkrugs(m, vals, wts, sc) {
     const g = new Map();
     feats.forEach((f, i) => { const k = f.properties.okrug; const o = g.get(k) || { s: 0, w: 0 }; o.s += vals[i] * wts[i]; o.w += wts[i]; g.set(k, o); });
+    const sum = m.agg === "sum" || m.id === "area";
+    if (sum) g.clear(), feats.forEach((f, i) => { const k = f.properties.okrug; const o = g.get(k) || { s: 0, w: 1 }; o.s += vals[i]; g.set(k, o); });
+    $("dOkrugLabel").textContent = sum ? "По округам (сумма)" : "По округам (среднее по площади)";
     const rows = [...g].map(([k, o]) => ({ k, v: o.s / o.w })).sort((a, b) => (m.good === "low" ? a.v - b.v : b.v - a.v));
     const W = 320, rowH = 18, L = 44, R = 70, H = rows.length * rowH + 4, mx = Math.max(...rows.map((r) => r.v), 1e-9);
     let s = "";
@@ -141,12 +149,12 @@ export function createDistricts({ map, $, state, BASE, beforeId, getMean, onChan
     card.hidden = false;
     const accAt = (T) => p.acc[T / T_MIN - 1];
     const tiles = [
+      [fmtPop(p.pop), "жителей"],
+      [`${Math.round(p.dens).toLocaleString("ru")}`, "человек на км²"],
       [`${fmtKm(accAt(60))} км²`, "охват за 60 мин"],
       [fmtMin(p.toCenter.p50), "до центра (типично)"],
-      [`${fmt1(p.metroWalk.mean)} мин`, "пешком до метро"],
-      [`${p.metro}`, "станций метро в районе"],
-      [`${p.stops}`, "остановок транспорта"],
-      [`${Math.round(p.streetKm)} км`, "улиц и дорожек"],
+      [p.popM10 != null ? `${Math.round(p.popM10 * 100)}%` : `${Math.round(p.metroWalk.w10 * 100)}%`, "жителей ≤ 10 мин от метро"],
+      [`${p.metro} ст. · ${p.stops} ост.`, "метро и остановки в районе"],
     ].map(([a, b]) => `<div class="tile"><b>${a}</b><span>${b}</span></div>`).join("");
     // ранги по показателям
     const bars = METRICS.filter((m) => m.good !== "none").map((m) => {
@@ -173,8 +181,8 @@ export function createDistricts({ map, $, state, BASE, beforeId, getMean, onChan
       <div class="label">Охват по времени: район и медиана по Москве</div>${curve}
       <div class="key"><span><i></i>${p.name}</span><span><i class="d"></i>медиана района</span></div>
       <div class="label">Время до центра: доля территории района</div>${dist}
-      <div class="label">Шаговая доступность территории</div>
-      ${walk("станция метро ≤ 10 мин", p.metroWalk.w10)}${walk("станция метро ≤ 15 мин", p.metroWalk.w15)}${walk("остановка ≤ 5 мин", p.stopWalk.w5)}
+      <div class="label">Шаговая доступность</div>
+      ${p.popM10 != null ? walk("жители ≤ 10 мин до метро", p.popM10) + walk("жители ≤ 15 мин до метро", p.popM15) + walk("жители ≤ 5 мин до остановки", p.popS5) : walk("территория ≤ 10 мин до метро", p.metroWalk.w10) + walk("территория ≤ 15 мин до метро", p.metroWalk.w15) + walk("территория ≤ 5 мин до остановки", p.stopWalk.w5)}
       ${p.accFallback ? '<p class="hint">Район слишком мал для собственных стартовых точек: охват взят у ближайшей.</p>' : ""}`;
     card.querySelector(".x").onclick = () => { state.dSel = null; card.hidden = true; map.setFilter("districts-sel", ["==", ["get", "id"], -1]); onChange?.(); };
   }

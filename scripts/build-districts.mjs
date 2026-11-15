@@ -18,6 +18,10 @@ const stationsAll = metro.features.filter((f) => f.properties.kind === 'station'
 const metroSt = stationsAll.filter((f) => f.properties.metro === true);
 reach.setStations(metroSt.map((f) => f.geometry.coordinates));
 
+// ---- население (people на ячейку 120 м) → на ячейку 30 м
+const popBuf = un('pop.bin.gz'), ph = new Int32Array(popBuf.slice(0, 12)), PW = ph[0], PR = ph[2], popArr = new Float32Array(popBuf.slice(12));
+const popAt = (x, y) => popArr[Math.floor(y / PR) * PW + Math.floor(x / PR)] / (PR * PR);
+
 // ---- районы и округа
 const rels = JSON.parse(fs.readFileSync(`${raw}/districts.json`, 'utf8')).elements;
 const okrugRels = JSON.parse(fs.readFileSync(`${raw}/okrugs.json`, 'utf8')).elements;
@@ -126,10 +130,15 @@ function walkField(seeds, budget) {
 }
 const mw = walkField(reach.stationSeeds(WALK), 3600);
 const metroWalk = { mean: new Float64Array(N + 1), w10: new Float64Array(N + 1), w15: new Float64Array(N + 1) };
-for (let i = 0; i < W * H; i++) { const l = label[i]; if (!l) continue; const t = mw[i]; metroWalk.mean[l] += Math.min(1800, t === Infinity ? 1800 : t); if (t <= 600) metroWalk.w10[l]++; if (t <= 900) metroWalk.w15[l]++; }
+const popD = new Float64Array(N + 1), popM10 = new Float64Array(N + 1), popM15 = new Float64Array(N + 1), popS5 = new Float64Array(N + 1);
+for (let i = 0; i < W * H; i++) {
+  const l = label[i]; if (!l) continue; const t = mw[i]; const x = i % W, y = (i / W) | 0, pp = popAt(x, y);
+  metroWalk.mean[l] += Math.min(1800, t === Infinity ? 1800 : t); if (t <= 600) metroWalk.w10[l]++; if (t <= 900) metroWalk.w15[l]++;
+  popD[l] += pp; if (t <= 600) popM10[l] += pp; if (t <= 900) popM15[l] += pp;
+}
 const sw = walkField(reach.hubSeeds(WALK), 1800);
 const stopWalk = { mean: new Float64Array(N + 1), w5: new Float64Array(N + 1) };
-for (let i = 0; i < W * H; i++) { const l = label[i]; if (!l) continue; const t = sw[i]; stopWalk.mean[l] += Math.min(1200, t === Infinity ? 1200 : t); if (t <= 300) stopWalk.w5[l]++; }
+for (let i = 0; i < W * H; i++) { const l = label[i]; if (!l) continue; const t = sw[i]; stopWalk.mean[l] += Math.min(1200, t === Infinity ? 1200 : t); if (t <= 300) { stopWalk.w5[l]++; popS5[l] += popAt(i % W, (i / W) | 0); } }
 console.log('пешие поля посчитаны');
 
 // ---- сборка
@@ -150,6 +159,7 @@ for (const d of districts) {
     properties: {
       id, name: d.name, full: d.full, okrug: d.okrug, c: [Math.round(clon * 1e4) / 1e4, Math.round(clat * 1e4) / 1e4],
       area: r1(km2), water: r2(barr[id] / n),
+      pop: Math.round(popD[id]), dens: Math.round(popD[id] / km2), popM10: popD[id] ? r2(popM10[id] / popD[id]) : null, popM15: popD[id] ? r2(popM15[id] / popD[id]) : null, popS5: popD[id] ? r2(popS5[id] / popD[id]) : null,
       metro: stMetro[id], mcd: stMcd[id], stops: hubs[id], streetKm: r1(streetM[id] / 1000),
       acc: Array.from(accSum[id], (v) => Math.round(v / accN[id])), accN: accN[id],
       toCenter: { mean: reached ? r1(sum / reached) : null, p50: pct(0.5), p90: pct(0.9), reached: r2(reached / n), bands },
