@@ -84,6 +84,7 @@ slider.oninput = () => { state.minutes = Number(slider.value); changed(false); }
 syncSeg();
 
 // ---------- расчёт и отрисовка ----------
+const BLANK = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
 const PALETTE = ["#0b3c5d", "#1d6a8a", "#2fa4a0", "#8fd18a", "#f4e285"]; // близко → далеко
 const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 const PAL = PALETTE.map(hex);
@@ -125,23 +126,40 @@ function update() {
   const step = bandStep(minutes), stepSec = step * 60;
   const nb = Math.ceil(minutes / step);
   const cols = Array.from({ length: nb }, (_, i) => colorAt(i, nb));
-  if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
-  // полосы по времени; границы полос и внешний край — тёмной тонкой линией
-  const bands = new Int8Array(W * H);
+  $("legend").innerHTML = cols.map((c) => `<i style="background:rgb(${c})"></i>`).join("");
+  $("legendEnd").textContent = `${minutes} мин (деления по ${step} мин)`;
+  const bb = reach.bbox;
+  if (!bb) { $("area").innerHTML = "Площадь: <b>0 км²</b>"; map.getSource("reach").updateImage({ url: BLANK, coordinates: reach.corners }); return; }
+  // рисуем только прямоугольник с зоной, в двойном разрешении (если влезает в ~16 млн пикселей): граница получается чётче
+  const x0 = Math.max(0, bb.x0 - 2), x1 = Math.min(W, bb.x1 + 2), y0 = Math.max(0, bb.y0 - 2), y1 = Math.min(H, bb.y1 + 2);
+  const cw = x1 - x0, ch = y1 - y0;
+  const SS = cw * ch * 4 <= 16e6 ? 2 : 1;
+  const OW = cw * SS, OH = ch * SS;
+  if (canvas.width !== OW || canvas.height !== OH) { canvas.width = OW; canvas.height = OH; }
   let cells = 0;
-  for (let i = 0; i < bands.length; i++) {
-    const t = best[i];
-    if (t <= budget) { bands[i] = Math.min(nb - 1, Math.floor(t / stepSec)); cells++; } else bands[i] = -1;
+  for (let y = y0; y < y1; y++) for (let x = x0, i = y * W + x0; x < x1; x++, i++) if (best[i] <= budget) cells++;
+  // 1) время в ячейках интерполируем билинейно, недостижимое — «потолок»; границу полос режем по интерполированному времени
+  const cap = budget * 1.6;
+  const tv = (x, y) => { const t = best[y * W + x]; return t < cap ? t : cap; };
+  const bands = new Int8Array(OW * OH);
+  for (let oy = 0; oy < OH; oy++) {
+    const g = Math.min(H - 1.001, Math.max(0, y0 + (oy + 0.5) / SS - 0.5)), yy = Math.floor(g), fy = g - yy;
+    for (let ox = 0; ox < OW; ox++) {
+      const h = Math.min(W - 1.001, Math.max(0, x0 + (ox + 0.5) / SS - 0.5)), xx = Math.floor(h), fx = h - xx;
+      const t = (tv(xx, yy) * (1 - fx) + tv(xx + 1, yy) * fx) * (1 - fy) + (tv(xx, yy + 1) * (1 - fx) + tv(xx + 1, yy + 1) * fx) * fy;
+      bands[oy * OW + ox] = t <= budget ? Math.min(nb - 1, Math.floor(t / stepSec)) : -1;
+    }
   }
-  const img = ctx.createImageData(W, H);
+  // 2) раскраска; границы полос и внешний край — тёмной тонкой линией
+  const img = ctx.createImageData(OW, OH);
   const d = img.data;
-  for (let y = 0; y < H; y++) {
-    const row = (H - 1 - y) * W; // y вверх → строка картинки сверху
-    for (let x = 0; x < W; x++) {
-      const idx = y * W + x, bnd = bands[idx];
+  for (let y = 0; y < OH; y++) {
+    const row = (OH - 1 - y) * OW; // y вверх → строка картинки сверху
+    for (let x = 0; x < OW; x++) {
+      const idx = y * OW + x, bnd = bands[idx];
       if (bnd < 0) continue;
       const o = (row + x) * 4, c = cols[bnd];
-      const edge = (x + 1 < W && bands[idx + 1] !== bnd) || (y + 1 < H && bands[idx + W] !== bnd) || (x > 0 && bands[idx - 1] < 0) || (y > 0 && bands[idx - W] < 0);
+      const edge = (x + 1 < OW && bands[idx + 1] !== bnd) || (y + 1 < OH && bands[idx + OW] !== bnd) || (x > 0 && bands[idx - 1] < 0) || (y > 0 && bands[idx - OW] < 0);
       const k = edge ? 0.6 : 1;
       d[o] = c[0] * k; d[o + 1] = c[1] * k; d[o + 2] = c[2] * k;
       d[o + 3] = edge ? 200 : 150;
@@ -151,13 +169,9 @@ function update() {
   const km2 = (cells * CELL * CELL) / 1e6;
   $("area").innerHTML = `Площадь: <b>${km2 < 10 ? km2.toFixed(1) : Math.round(km2).toLocaleString("ru")} км²</b>`;
 
-  // легенда
-  $("legend").innerHTML = cols.map((c) => `<i style="background:rgb(${c})"></i>`).join("");
-  $("legendEnd").textContent = `${minutes} мин (деления по ${step} мин)`;
-
   canvas.toBlob((blob) => {
     const url = URL.createObjectURL(blob);
-    map.getSource("reach").updateImage({ url, coordinates: reach.corners });
+    map.getSource("reach").updateImage({ url, coordinates: reach.cornersFor(x0, y0, x1, y1) });
     if (lastBlob) setTimeout(() => URL.revokeObjectURL(lastBlob), 2000);
     lastBlob = url;
   });
@@ -195,16 +209,17 @@ map.on("load", async () => {
     if (head[0] !== 0x1f || head[1] !== 0x8b) return buf;
     return new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
   };
-  const [net, streetsBuf, barrierBuf] = await Promise.all([
+  const [net, streetsBuf, barrierBuf, coverBuf] = await Promise.all([
     fetch(`${BASE}network.json`).then((r) => r.json()),
     gunzip(`${BASE}streets.bin.gz`),
     gunzip(`${BASE}barrier.bin.gz`),
+    gunzip(`${BASE}cover.bin.gz`),
   ]);
   $("busy").textContent = "Строю граф улиц…";
   await new Promise((r) => setTimeout(r, 30)); // дать перерисоваться подписи
-  reach = new Reach(net, parseStreets(streetsBuf), new Uint8Array(barrierBuf));
+  reach = new Reach(net, parseStreets(streetsBuf), new Uint8Array(barrierBuf), coverBuf);
   canvas = document.createElement("canvas");
-  canvas.width = reach.W; canvas.height = reach.H;
+  canvas.width = 1; canvas.height = 1;
   ctx = canvas.getContext("2d");
 
   const firstSymbol = map.getStyle().layers.find((l) => l.type === "symbol")?.id;
@@ -218,13 +233,13 @@ map.on("load", async () => {
   // ---- метро, МЦК и МЦД на карте
   map.addSource("metro", { type: "geojson", data: `${BASE}metro.json` });
   const isLine = ["==", ["geometry-type"], "LineString"];
-  const W = (a, b) => ["interpolate", ["linear"], ["zoom"], 9, a, 15, b];
-  map.addLayer({ id: "metro-casing", type: "line", source: "metro", filter: ["all", isLine, ["!=", ["get", "kind"], "mcd"]], layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": "#fff", "line-opacity": 0.85, "line-width": W(3.5, 9) } }, firstSymbol);
-  map.addLayer({ id: "mcd-lines", type: "line", source: "metro", filter: ["all", isLine, ["==", ["get", "kind"], "mcd"]], layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["get", "colour"], "line-opacity": 0.8, "line-width": W(1, 3) } }, firstSymbol);
-  map.addLayer({ id: "metro-lines", type: "line", source: "metro", filter: ["all", isLine, ["!=", ["get", "kind"], "mcd"]], layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["get", "colour"], "line-width": W(1.8, 5.5) } }, firstSymbol);
-  map.addLayer({ id: "metro-stations", type: "circle", source: "metro", filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], true]], paint: { "circle-radius": W(2, 6), "circle-color": "#fff", "circle-stroke-width": W(1, 2.2), "circle-stroke-color": ["case", ["==", ["get", "n"], 1], ["get", "colours"], "#2b2b2b"] } }, firstSymbol);
-  map.addLayer({ id: "mcd-stations", type: "circle", minzoom: 11, source: "metro", filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], false]], paint: { "circle-radius": W(1.5, 4), "circle-color": "#fff", "circle-stroke-width": 1.2, "circle-stroke-color": "#555" } }, firstSymbol);
-  map.addLayer({ id: "metro-labels", type: "symbol", source: "metro", minzoom: 11.5, filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], true]], layout: { "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": 12, "text-offset": [0, 0.9], "text-anchor": "top", "text-optional": true }, paint: { "text-color": "#222", "text-halo-color": "#fff", "text-halo-width": 1.5 } });
+  const W = (a, b, c) => ["interpolate", ["linear"], ["zoom"], 9, a, 13, b, 16, c];
+  map.addLayer({ id: "metro-casing", type: "line", source: "metro", filter: ["all", isLine, ["!=", ["get", "kind"], "mcd"]], layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": "#fff", "line-opacity": 0.85, "line-width": W(1.4, 3, 8) } }, firstSymbol);
+  map.addLayer({ id: "mcd-lines", type: "line", source: "metro", filter: ["all", isLine, ["==", ["get", "kind"], "mcd"]], layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["get", "colour"], "line-opacity": 0.75, "line-width": W(0.4, 1, 2.5) } }, firstSymbol);
+  map.addLayer({ id: "metro-lines", type: "line", source: "metro", filter: ["all", isLine, ["!=", ["get", "kind"], "mcd"]], layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["get", "colour"], "line-width": W(0.7, 1.8, 5) } }, firstSymbol);
+  map.addLayer({ id: "metro-stations", type: "circle", source: "metro", filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], true]], paint: { "circle-radius": W(0.8, 2.4, 5.5), "circle-color": "#fff", "circle-stroke-width": W(0.5, 1.1, 2), "circle-stroke-color": ["case", ["==", ["get", "n"], 1], ["get", "colours"], "#2b2b2b"] } }, firstSymbol);
+  map.addLayer({ id: "mcd-stations", type: "circle", minzoom: 12, source: "metro", filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], false]], paint: { "circle-radius": W(0.8, 1.8, 3.5), "circle-color": "#fff", "circle-stroke-width": 0.8, "circle-stroke-color": "#555" } }, firstSymbol);
+  map.addLayer({ id: "metro-labels", type: "symbol", source: "metro", minzoom: 12.5, filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], true]], layout: { "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": ["interpolate", ["linear"], ["zoom"], 12.5, 10, 16, 13], "text-offset": [0, 0.8], "text-anchor": "top", "text-optional": true }, paint: { "text-color": "#222", "text-halo-color": "#fff", "text-halo-width": 1.5 } });
   const METRO_LAYERS = ["metro-casing", "mcd-lines", "metro-lines", "metro-stations", "mcd-stations", "metro-labels"];
   const setMetro = (on) => { for (const id of METRO_LAYERS) map.setLayoutProperty(id, "visibility", on ? "visible" : "none"); };
   const chip = $("chipMetro");

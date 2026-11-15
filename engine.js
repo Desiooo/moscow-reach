@@ -86,7 +86,7 @@ export function parseStreets(buf) {
 
 export class Reach {
   /** net — транспортная сеть, streets — результат parseStreets, barrierBits — распакованная маска препятствий. */
-  constructor(net, streets, barrierBits) {
+  constructor(net, streets, barrierBits, coverBuf) {
     const b = net.bbox;
     this.mx0 = mercX(b.minLon); this.my0 = mercY(b.minLat);
     this.W = Math.ceil((mercX(b.maxLon) - this.mx0) / CS);
@@ -134,6 +134,19 @@ export class Reach {
     // маска препятствий
     this.barrier = new Uint8Array(this.W * this.H);
     for (let i = 0; i < this.barrier.length; i++) this.barrier[i] = (barrierBits[i >> 3] >> (i & 7)) & 1;
+
+    // покрытие улицами: грубая маска (ячейки CC метров) → по ячейкам растра. Вне покрытия улиц нет, ходим «по прямой».
+    {
+      const hdr = new Int32Array(coverBuf.slice(0, 12)), cw = hdr[0], CC = hdr[2], bits = new Uint8Array(coverBuf, 12);
+      this.cov = new Uint8Array(this.W * this.H);
+      for (let y = 0; y < this.H; y++) {
+        const cy = Math.floor((y * CELL) / CC);
+        for (let x = 0; x < this.W; x++) {
+          const ci = cy * cw + Math.floor((x * CELL) / CC);
+          this.cov[y * this.W + x] = (bits[ci >> 3] >> (ci & 7)) & 1;
+        }
+      }
+    }
 
     // ---- транспорт: хабы
     const H = (this.nh = net.hubs.length / 2);
@@ -274,24 +287,30 @@ export class Reach {
   run(lon, lat, { walkMs, modes, maxSec }) {
     const inv = 1 / walkMs;
     const [ox, oy] = this.lonLatToCell(lon, lat);
-    const s = this.snap(ox, oy);
     this.last = null;
-    if (!s) return false;
-    const oseeds = [s[0], s[1] * inv]; if (s[2] >= 0) oseeds.push(s[2], s[3] * inv);
+    if (ox < 0 || oy < 0 || ox >= this.W || oy >= this.H) return false;
+    const s = this.snap(ox, oy);
+    const gridSeeds = []; // [индекс ячейки, время] — источники для «ходьбы по прямой» вне улиц
+    const oseeds = [];
+    const originFree = !s; // рядом нет улиц (за пределами покрытия) — идём по прямой
+    if (s) { oseeds.push(s[0], s[1] * inv); if (s[2] >= 0) oseeds.push(s[2], s[3] * inv); }
+    else gridSeeds.push(Math.floor(oy) * this.W + Math.floor(ox), 0);
     const H = this.nh;
     const seeds2 = oseeds.slice();
     let anyTransit = false;
     for (let m = 0; m < 6; m++) if (modes[m]) anyTransit = true;
 
     if (anyTransit) {
-      // 1) пешком от старта до остановок по улицам
+      // 1) пешком от старта до остановок: по улицам, а где улиц нет — по прямой с запасом на извилистость
       this._dijkstra(this.dist1, oseeds, Math.min(maxSec, WALK_CUT), inv);
       const dist = new Float64Array(2 * H + this.nrn).fill(Infinity);
       const heap = this.heap; heap.n = 0;
+      const cut = Math.min(maxSec, WALK_CUT);
       for (let h = 0; h < H; h++) {
         let t = Infinity;
-        for (let j = 0; j < 2; j++) { const n = this.hubN[2 * h + j]; if (n >= 0) t = Math.min(t, this.dist1[n] + this.hubM[2 * h + j] * inv); }
-        if (t < Math.min(maxSec, WALK_CUT)) { dist[H + h] = t; heap.push(t, H + h); }
+        if (!originFree) for (let j = 0; j < 2; j++) { const n = this.hubN[2 * h + j]; if (n >= 0) t = Math.min(t, this.dist1[n] + this.hubM[2 * h + j] * inv); }
+        if (originFree || this.hubN[2 * h] < 0) t = Math.min(t, (Math.hypot(this.hx[h] - ox, this.hy[h] - oy) * CELL * DETOUR) * inv);
+        if (t < cut) { dist[H + h] = t; heap.push(t, H + h); }
       }
       // 2) транспорт
       while (heap.n) {
@@ -324,22 +343,39 @@ export class Reach {
       for (let h = 0; h < H; h++) {
         const T = Math.min(dist[h], dist[H + h]);
         if (!(T < maxSec)) continue;
-        for (let j = 0; j < 2; j++) { const n = this.hubN[2 * h + j]; if (n >= 0) seeds2.push(n, T + this.hubM[2 * h + j] * inv); }
+        if (this.hubN[2 * h] >= 0) {
+          for (let j = 0; j < 2; j++) { const n = this.hubN[2 * h + j]; if (n >= 0) seeds2.push(n, T + this.hubM[2 * h + j] * inv); }
+        } else {
+          const x = Math.floor(this.hx[h]), y = Math.floor(this.hy[h]);
+          if (x >= 0 && y >= 0 && x < this.W && y < this.H) gridSeeds.push(y * this.W + x, T);
+        }
       }
     }
     this._dijkstra(this.dist2, seeds2, maxSec, inv);
-    this.last = { walkMs, maxSec, ox, oy };
+    this.last = { walkMs, maxSec, ox, oy, gridSeeds };
     return true;
   }
 
-  /** Растр времени (сек) W×H, y вверх; Infinity там, куда не дойти. */
+  /** Углы картинки (верх-лево, верх-право, низ-право, низ-лево) для прямоугольника ячеек [x0,x1)×[y0,y1), y вверх. */
+  cornersFor(x0, y0, x1, y1) {
+    const X = (c) => unMercX(this.mx0 + c * CS), Y = (c) => unMercY(this.my0 + c * CS);
+    return [[X(x0), Y(y1)], [X(x1), Y(y1)], [X(x1), Y(y0)], [X(x0), Y(y0)]];
+  }
+
+  /**
+   * Растр времени (сек) W×H, y вверх; Infinity там, куда не дойти. Шаги:
+   *  1) время вдоль улиц; 2) кайма вокруг улиц (не через воду/пути); 3) вне зоны улиц — ходьба по прямой
+   *  с запасом на извилистость, но не через воду и пути (мосты проходимы); 4) заполнение «дыр» внутри зоны.
+   * Результат: this.best, и this.bbox = {x0,x1,y0,y1} ячеек со временем ≤ budget.
+   */
   raster(budget) {
-    const { walkMs } = this.last, { W, H, gx, gy, eu, ev, dist2: dist, barrier } = this;
-    if (!this.best) { this.best = new Float32Array(W * H); this.off = new Uint8Array(W * H); }
+    const { walkMs, gridSeeds } = this.last, { W, H, gx, gy, eu, ev, dist2: dist, barrier, cov } = this;
+    if (!this.best) { this.best = new Float32Array(W * H); this.off = new Uint8Array(W * H); this.vis = new Uint8Array(W * H); this.q = new Int32Array(W * H); }
     const best = this.best, off = this.off;
     best.fill(Infinity); off.fill(255);
     const spc = CELL / walkMs; // секунд на ячейку
     let minx = W, maxx = 0, miny = H, maxy = 0;
+    const grow = (x, y) => { if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y; };
     // 1) время вдоль улиц
     for (let k = 0; k < eu.length; k++) {
       const u = eu[k], v = ev[k], tu = dist[u], tv = dist[v];
@@ -352,30 +388,89 @@ export class Reach {
         const x = Math.floor(ax + f * (bx - ax)), y = Math.floor(ay + f * (by - ay));
         if (x < 0 || y < 0 || x >= W || y >= H) continue;
         const i = y * W + x;
-        if (t < best[i]) { best[i] = t; off[i] = 0; if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y; }
+        if (t < best[i]) { best[i] = t; off[i] = 0; grow(x, y); }
       }
     }
-    // 2) кайма вокруг улиц: двухпроходное расстояние, не заходя в воду/пути, и не дальше FRINGE_M
-    if (minx <= maxx) {
+    // источники «по прямой»: хабы без улиц и старт без улиц
+    for (let k = 0; k < gridSeeds.length; k += 2) {
+      const i = gridSeeds[k], t = gridSeeds[k + 1];
+      if (t <= budget && t < best[i]) { best[i] = t; off[i] = 0; grow(i % W, (i / W) | 0); }
+    }
+    if (minx > maxx) { this.bbox = null; return best; }
+    const D1 = CELL, D2 = CELL * Math.SQRT2;
+    // 2) кайма вокруг улиц (двухпроходное расстояние), не заходя в воду/пути и не дальше FRINGE_M
+    {
       const x0 = Math.max(1, minx - 3), x1 = Math.min(W - 2, maxx + 3), y0 = Math.max(1, miny - 3), y1 = Math.min(H - 2, maxy + 3);
-      const D1 = CELL, D2 = CELL * Math.SQRT2;
-      const tryUpd = (i, j, step) => { // обновить ячейку i от соседа j
+      const tryUpd = (i, j, step) => {
         if (off[i] === 0) return;
         const tj = best[j]; if (tj === Infinity) return;
-        const dj = off[j] === 255 ? 0 : off[j] + step; if (dj > FRINGE_M) return;
+        const dj = off[j] + step; if (dj > FRINGE_M) return;
         if (barrier[i]) return;
         const t = tj + step / walkMs;
         if (t < best[i]) { best[i] = t; off[i] = Math.min(254, Math.round(dj)); }
       };
-      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
-        const i = y * W + x;
-        tryUpd(i, i - 1, D1); tryUpd(i, i - W - 1, D2); tryUpd(i, i - W, D1); tryUpd(i, i - W + 1, D2);
-      }
-      for (let y = y1; y >= y0; y--) for (let x = x1; x >= x0; x--) {
-        const i = y * W + x;
-        tryUpd(i, i + 1, D1); tryUpd(i, i + W + 1, D2); tryUpd(i, i + W, D1); tryUpd(i, i + W - 1, D2);
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const i = y * W + x; tryUpd(i, i - 1, D1); tryUpd(i, i - W - 1, D2); tryUpd(i, i - W, D1); tryUpd(i, i - W + 1, D2); }
+      for (let y = y1; y >= y0; y--) for (let x = x1; x >= x0; x--) { const i = y * W + x; tryUpd(i, i + 1, D1); tryUpd(i, i + W + 1, D2); tryUpd(i, i + W, D1); tryUpd(i, i + W - 1, D2); }
+      grow(x0, y0); grow(x1, y1);
+    }
+    // 3) вне зоны улиц: ходьба по прямой (×DETOUR), не через воду и пути; мосты проходимы (в маске они сняты)
+    {
+      const r = Math.min(Math.max(W, H), Math.ceil((budget * walkMs) / DETOUR / CELL) + 2);
+      const x0 = Math.max(1, minx - r), x1 = Math.min(W - 2, maxx + r), y0 = Math.max(1, miny - r), y1 = Math.min(H - 2, maxy + r);
+      const k1 = (D1 * DETOUR) / walkMs, k2 = (D2 * DETOUR) / walkMs;
+      let changed = false;
+      const upd = (i, j, k) => {
+        if (cov[i] || barrier[i]) return; // внутри зоны улиц — только по улицам
+        const t = best[j] + k;
+        if (t < best[i] && t <= budget) { best[i] = t; off[i] = 254; changed = true; }
+      };
+      for (let round = 0; round < 4; round++) {
+        changed = false;
+        for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) { const i = y * W + x; upd(i, i - 1, k1); upd(i, i - W - 1, k2); upd(i, i - W, k1); upd(i, i - W + 1, k2); }
+        for (let y = y1; y >= y0; y--) for (let x = x1; x >= x0; x--) { const i = y * W + x; upd(i, i + 1, k1); upd(i, i + W + 1, k2); upd(i, i + W, k1); upd(i, i + W - 1, k2); }
+        if (!changed) break;
       }
     }
+    // границы всей закрашенной области
+    minx = W; maxx = 0; miny = H; maxy = 0;
+    for (let y = 0; y < H; y++) { const row = y * W; for (let x = 0; x < W; x++) if (best[row + x] <= budget) { if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y; } }
+    if (minx > maxx) { this.bbox = null; return best; }
+    // 4) заполнение «дыр»: компоненты незакрашенной суши, окружённые закрашенным (а не водой и не внешней стороной)
+    {
+      const vis = this.vis, q = this.q, MAXHOLE = 6000;
+      const bx0 = Math.max(0, minx - 1), bx1 = Math.min(W - 1, maxx + 1), by0 = Math.max(0, miny - 1), by1 = Math.min(H - 1, maxy + 1);
+      for (let y = by0; y <= by1; y++) vis.fill(0, y * W + bx0, y * W + bx1 + 1);
+      const land = (i) => best[i] > budget && !barrier[i];
+      for (let sy = by0 + 1; sy < by1; sy++) for (let sx = bx0 + 1; sx < bx1; sx++) {
+        const si = sy * W + sx;
+        if (vis[si] || !land(si)) continue;
+        let head = 0, tail = 0, edgeReach = 0, edgeBar = 0, outer = false, cx0 = sx, cx1 = sx, cy0 = sy, cy1 = sy;
+        q[tail++] = si; vis[si] = 1;
+        while (head < tail) {
+          const i = q[head++], x = i % W, y = (i / W) | 0;
+          if (x < cx0) cx0 = x; if (x > cx1) cx1 = x; if (y < cy0) cy0 = y; if (y > cy1) cy1 = y;
+          for (let n = 0; n < 4; n++) {
+            const nx = n === 0 ? x - 1 : n === 1 ? x + 1 : x, ny = n === 2 ? y - 1 : n === 3 ? y + 1 : y;
+            if (nx <= bx0 || nx >= bx1 || ny <= by0 || ny >= by1) { outer = true; continue; }
+            const j = ny * W + nx;
+            if (best[j] <= budget) edgeReach++;
+            else if (barrier[j]) edgeBar++;
+            else if (!vis[j]) { vis[j] = 1; q[tail++] = j; }
+          }
+        }
+        if (outer || tail > MAXHOLE || edgeReach < 0.6 * (edgeReach + edgeBar)) continue;
+        // заливка: время растёт от границы внутрь (двухпроходное расстояние в пределах дыры)
+        for (let k = 0; k < tail; k++) vis[q[k]] = 2;
+        const kk1 = D1 / walkMs, kk2 = D2 / walkMs;
+        const fillUpd = (i, j, k) => { if (vis[i] === 2 && best[j] !== Infinity) { const t = best[j] + k; if (t < best[i]) best[i] = t; } };
+        for (let round = 0; round < 2; round++) {
+          for (let y = cy0; y <= cy1; y++) for (let x = cx0; x <= cx1; x++) { const i = y * W + x; fillUpd(i, i - 1, kk1); fillUpd(i, i - W - 1, kk2); fillUpd(i, i - W, kk1); fillUpd(i, i - W + 1, kk2); }
+          for (let y = cy1; y >= cy0; y--) for (let x = cx1; x >= cx0; x--) { const i = y * W + x; fillUpd(i, i + 1, kk1); fillUpd(i, i + W + 1, kk2); fillUpd(i, i + W, kk1); fillUpd(i, i + W - 1, kk2); }
+        }
+        for (let k = 0; k < tail; k++) { const i = q[k]; if (best[i] > budget) best[i] = budget; }
+      }
+    }
+    this.bbox = { x0: minx, x1: maxx + 1, y0: miny, y1: maxy + 1 };
     return best;
   }
 }

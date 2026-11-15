@@ -74,13 +74,13 @@ function fillPolygon(rings, tx, ty) { // чётно-нечётная залив�
     for (let i = 0; i + 1 < xs.length; i += 2) for (let x = Math.max(0, Math.ceil(xs[i] - 0.5)); x <= Math.min(GW - 1, Math.floor(xs[i + 1] - 0.5)); x++) mask[y * GW + x] = 1;
   }
 }
-function drawLine(rings, tx, ty) {
+function drawLine(rings, tx, ty, val = 1) {
   for (const r of rings) for (let i = 0; i + 1 < r.length; i++) {
     const ax = gridX(tx * EXT + r[i].x), ay = gridY(ty * EXT + r[i].y), bx = gridX(tx * EXT + r[i + 1].x), by = gridY(ty * EXT + r[i + 1].y);
     const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) * 3));
     for (let s = 0; s <= n; s++) {
       const x = Math.floor(ax + ((bx - ax) * s) / n), y = Math.floor(ay + ((by - ay) * s) / n);
-      for (const [dx, dy] of [[0, 0], [1, 0], [0, 1]]) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < GW && yy < GH) mask[yy * GW + xx] = 1; }
+      for (const [dx, dy] of [[0, 0], [1, 0], [0, 1]]) { const xx = x + dx, yy = y + dy; if (xx >= 0 && yy >= 0 && xx < GW && yy < GH) mask[yy * GW + xx] = val; }
     }
   }
 }
@@ -118,10 +118,18 @@ const cw = Math.ceil((GW * CELL) / CC), ch = Math.ceil((GH * CELL) / CC), city =
   const rr = Math.round(MARGIN_M / CC), tmp = new Uint8Array(cw * ch);
   for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) { let v = 0; for (let k = Math.max(0, x - rr); k <= Math.min(cw - 1, x + rr) && !v; k++) v = city[y * cw + k]; tmp[y * cw + x] = v; }
   for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) { let v = 0; for (let k = Math.max(0, y - rr); k <= Math.min(ch - 1, y + rr) && !v; k++) v = tmp[k * cw + x]; city[y * cw + x] = v; }
+  // дополнительные прямоугольники вне Москвы: [minLon, minLat, maxLon, maxLat]
+  const EXTRA = process.env.EXTRA ? JSON.parse(process.env.EXTRA) : [[36.80, 55.66, 37.45, 56.05]];
+  for (const [a, b, c2, d2] of EXTRA) {
+    const gx0 = Math.floor(((mercX(a) - mx0) / CS) * CELL / CC), gx1 = Math.ceil(((mercX(c2) - mx0) / CS) * CELL / CC);
+    const gy0 = Math.floor(((mercY(b) - my0) / CS) * CELL / CC), gy1 = Math.ceil(((mercY(d2) - my0) / CS) * CELL / CC);
+    for (let y = Math.max(0, gy0); y < Math.min(ch, gy1); y++) for (let x = Math.max(0, gx0); x < Math.min(cw, gx1); x++) city[y * cw + x] = 1;
+  }
   let c = 0; for (const v of city) c += v; console.log('city cells', c, '≈ km²', ((c * CC * CC) / 1e6).toFixed(0));
 }
 const inCity = (gx, gy) => { const x = Math.floor((gridX(gx) * CELL) / CC), y = Math.floor((gridY(gy) * CELL) / CC); return x >= 0 && y >= 0 && x < cw && y < ch && city[y * cw + x] === 1; };
 
+const bridges = []; // [rings, tx, ty]
 const waterKinds = {}; let kept = 0, total = 0, tilesDone = 0;
 for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
   const t = await p.getZxy(Z, tx, ty); if (!t) continue;
@@ -133,6 +141,7 @@ for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
     const props = f.properties; total++;
     if (props.kind === 'rail' && !props.is_tunnel && !/subway|tunnel|tram|monorail|funicular/.test(props.kind_detail || '')) drawLine(f.loadGeometry(), tx, ty);
     if (!walkable(props)) continue;
+    if (props.is_bridge) bridges.push([f.loadGeometry(), tx, ty]);
     kept++;
     for (const line of f.loadGeometry()) {
       let prev = null;
@@ -160,6 +169,8 @@ for (let ty = y0; ty <= y1; ty++) for (let tx = x0; tx <= x1; tx++) {
   }
   if (tilesDone % 2000 === 0) console.log('tiles', tilesDone, 'nodes', nx.length, 'edges', edges.length / 2);
 }
+for (const [rings, tx, ty] of bridges) drawLine(rings, tx, ty, 0); // мосты проходимы
+console.log('bridges', bridges.length);
 console.log('water kinds', waterKinds);
 console.log('roads total', total, 'walkable', kept, 'nodes', nx.length, 'edges', edges.length / 2);
 
@@ -281,5 +292,7 @@ const parts = [Buffer.from(header.buffer), planes(dLon), planes(dLat), Buffer.fr
 fs.writeFileSync(`${outDir}/streets.bin.gz`, zlib.gzipSync(Buffer.concat(parts), { level: 9 }));
 const bits = new Uint8Array(Math.ceil((GW * GH) / 8)); for (let i = 0; i < mask.length; i++) if (mask[i]) bits[i >> 3] |= 1 << (i & 7);
 fs.writeFileSync(`${outDir}/barrier.bin.gz`, zlib.gzipSync(Buffer.from(bits), { level: 9 }));
+const cbits = new Uint8Array(Math.ceil((cw * ch) / 8)); for (let i = 0; i < city.length; i++) if (city[i]) cbits[i >> 3] |= 1 << (i & 7);
+fs.writeFileSync(`${outDir}/cover.bin.gz`, zlib.gzipSync(Buffer.concat([Buffer.from(Int32Array.from([cw, ch, CC]).buffer), Buffer.from(cbits)]), { level: 9 }));
 let blocked = 0; for (const v of mask) blocked += v;
 console.log('grid', GW, 'x', GH, 'blocked cells', blocked, 'files', fs.statSync(`${outDir}/streets.bin.gz`).size, fs.statSync(`${outDir}/barrier.bin.gz`).size);
