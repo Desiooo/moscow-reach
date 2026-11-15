@@ -20,8 +20,10 @@ const METRICS = [
   { id: "area", name: "Площадь", unit: "км²", good: "none", get: (p) => p.area, fmt: (v) => `${fmtKm(v)} км²`, hint: "Площадь района." },
 ];
 
-export function createDistricts({ map, $, state, BASE, beforeId, getMean, onChange }) {
+export function createDistricts({ map, $, state, BASE, beforeId, getMean, getClip, onChange }) {
   let feats = null, loading = null, hoverId = null, hovering = false;
+  const pp = (f) => (getClip() ? f.pc : f.properties); // свойства района с учётом режима «без Замкадья» (null — района внутри МКАД нет)
+  const visible = () => feats.filter((f) => pp(f));
   const byId = new Map();
   let cur = null; // текущая шкала и значения
 
@@ -32,8 +34,9 @@ export function createDistricts({ map, $, state, BASE, beforeId, getMean, onChan
     if (feats) return true;
     if (!loading) loading = (async () => {
       try {
-        const gj = await (await fetch(`${BASE}districts.json`)).json();
-        feats = gj.features; for (const f of feats) byId.set(f.properties.id, f);
+        const gj = await (await fetch(`${BASE}districts.json?v=${__BUILD__}`)).json();
+        feats = gj.features; for (const f of feats) { byId.set(f.properties.id, f); const k = f.properties.k && f.properties.k.area >= 0.5 ? f.properties.k : null; // осколки района меньше 0,5 км² внутри МКАД не показываем
+          f.pc = k ? { ...f.properties, ...k } : null; f.properties.hasK = k ? 1 : 0; }
         map.addSource("districts", { type: "geojson", data: gj, promoteId: "id" });
         map.addLayer({ id: "districts-fill", type: "fill", source: "districts", layout: { visibility: "none" }, paint: { "fill-color": ["coalesce", ["feature-state", "c"], "rgba(0,0,0,0)"], "fill-opacity": ["case", ["boolean", ["feature-state", "hover"], false], 0.92, 0.78] } }, beforeId);
         map.addLayer({ id: "districts-line", type: "line", source: "districts", layout: { visibility: "none" }, paint: { "line-color": "#fff", "line-opacity": 0.85, "line-width": ["interpolate", ["linear"], ["zoom"], 8, 0.5, 13, 1.6] } }, beforeId);
@@ -44,13 +47,14 @@ export function createDistricts({ map, $, state, BASE, beforeId, getMean, onChan
           const id = f.properties.id;
           map.getCanvas().style.cursor = "pointer";
           if (hoverId !== id) { if (hoverId != null) map.setFeatureState({ source: "districts", id: hoverId }, { hover: false }); hoverId = id; map.setFeatureState({ source: "districts", id }, { hover: true }); }
-          const p = byId.get(id).properties, m = metricOf(), tip = $("tip");
+          const p = pp(byId.get(id)), m = metricOf(), tip = $("tip");
+          if (!p) { tip.style.display = "none"; return; }
           tip.innerHTML = `<b>${p.name}</b> · ${p.okrug}<br>${m.name.replace("N", state.aT)}: ${m.fmt(valOf(m, p))}`;
           tip.style.display = "block"; tip.style.left = `${e.point.x + 14}px`; tip.style.top = `${e.point.y + 14}px`;
           hovering = true;
         });
         map.on("mouseleave", "districts-fill", () => { if (hoverId != null) map.setFeatureState({ source: "districts", id: hoverId }, { hover: false }); hoverId = null; hovering = false; $("tip").style.display = "none"; map.getCanvas().style.cursor = ""; });
-        map.on("click", "districts-fill", (e) => { if (state.view !== "districts") return; const f = e.features?.[0]; if (f) select(f.properties.id, false); });
+        map.on("click", "districts-fill", (e) => { if (state.view !== "districts") return; const f = e.features?.[0]; if (f && pp(byId.get(f.properties.id))) select(f.properties.id, false); });
         return true;
       } catch (e) { console.warn("районы не загрузились", e); feats = null; loading = null; return false; }
     })();
@@ -86,19 +90,22 @@ export function createDistricts({ map, $, state, BASE, beforeId, getMean, onChan
     for (const b of chipBox.children) b.setAttribute("aria-pressed", b.dataset.m === m.id);
     $("dSliderBox").hidden = !m.dyn; $("dSlider").value = state.aT; $("dMins").textContent = state.aT;
     $("dHint").textContent = m.hint;
-    const vals = feats.map((f) => valOf(m, f.properties));
-    const wts = feats.map((f) => f.properties.area);
+    const vis = visible(), clip = getClip();
+    const vals = vis.map((f) => valOf(m, pp(f)));
+    const wts = vis.map((f) => pp(f).area);
+    for (const id of ["districts-line", "districts-labels"]) map.setFilter(id, clip ? ["==", ["get", "hasK"], 1] : null);
     const sc = makeScale(vals, getMean());
     const col = (v) => { const t = sc.f(v); return lerpPal(VIR, 1 - (m.good === "low" ? 1 - t : t)); };
     cur = { m, sc, col, vals };
-    feats.forEach((f, i) => map.setFeatureState({ source: "districts", id: f.properties.id }, { c: rgbHex(col(vals[i])) }));
+    for (const f of feats) map.setFeatureState({ source: "districts", id: f.properties.id }, { c: "rgba(0,0,0,0)" });
+    vis.forEach((f, i) => map.setFeatureState({ source: "districts", id: f.properties.id }, { c: rgbHex(col(vals[i])) }));
     // легенда
     const legend = $("dLegend"); legend.style.background = `linear-gradient(90deg, ${[0, 0.25, 0.5, 0.75, 1].map((x) => `rgb(${lerpPal(VIR, 1 - (m.good === "low" ? 1 - x : x))})`).join(",")})`;
     $("dLo").textContent = m.fmt(sc.min); $("dMid").textContent = `${MEANS.find((x) => x.id === getMean()).short} ${m.fmt(sc.mid)}`; $("dHi").textContent = m.fmt(sc.max);
     $("scaleInfo").textContent = `Среднее по районам: арифм. ${m.fmt(sc.arith)} · геом. ${m.fmt(sc.geo)} · квадр. ${m.fmt(sc.quad)}`;
     $("dSummary").innerHTML = `${m.name.replace("N", `<b>${state.aT}</b>`)}${m.good === "low" ? " · <small>красный — лучше</small>" : m.good === "high" ? " · <small>красный — больше</small>" : ""}`;
     // рейтинги: лучшие и худшие
-    const order = feats.map((f, i) => ({ f, v: vals[i] })).sort((a, b) => (m.good === "low" ? a.v - b.v : b.v - a.v));
+    const order = vis.map((f, i) => ({ f, v: vals[i] })).sort((a, b) => (m.good === "low" ? a.v - b.v : b.v - a.v));
     const fillList = (el, list) => {
       el.innerHTML = "";
       list.forEach((x, i) => { const li = document.createElement("li"); li.innerHTML = `<span class="n">${i + 1}</span><span class="nm">${x.f.properties.name}<small>${x.f.properties.okrug}</small></span><span class="v">${m.fmt(x.v)}</span>`; li.onclick = () => select(x.f.properties.id, true); el.appendChild(li); });
@@ -108,16 +115,16 @@ export function createDistricts({ map, $, state, BASE, beforeId, getMean, onChan
     $("dTopLabel").textContent = m.good === "none" ? "Самые большие" : m.good === "low" ? "Лучшие (меньше — лучше)" : "Лучшие";
     $("dBottomLabel").textContent = m.good === "none" ? "Самые маленькие" : "Худшие";
     if (m.good === "none") { fillList($("dBottom"), order.slice(-5).reverse()); }
-    drawOkrugs(m, vals, wts, sc);
-    if (state.dSel != null) renderCard(state.dSel);
+    drawOkrugs(m, vals, wts, sc, vis);
+    if (state.dSel != null) { if (pp(byId.get(state.dSel) || {})) renderCard(state.dSel); else { $("dCard").hidden = true; map.setFilter("districts-sel", ["==", ["get", "id"], -1]); } }
   }
 
   // ---- по округам (среднее, взвешенное по площади)
-  function drawOkrugs(m, vals, wts, sc) {
+  function drawOkrugs(m, vals, wts, sc, vis) {
     const g = new Map();
-    feats.forEach((f, i) => { const k = f.properties.okrug; const o = g.get(k) || { s: 0, w: 0 }; o.s += vals[i] * wts[i]; o.w += wts[i]; g.set(k, o); });
+    vis.forEach((f, i) => { const k = f.properties.okrug; const o = g.get(k) || { s: 0, w: 0 }; o.s += vals[i] * wts[i]; o.w += wts[i]; g.set(k, o); });
     const sum = m.agg === "sum" || m.id === "area";
-    if (sum) g.clear(), feats.forEach((f, i) => { const k = f.properties.okrug; const o = g.get(k) || { s: 0, w: 1 }; o.s += vals[i]; g.set(k, o); });
+    if (sum) g.clear(), vis.forEach((f, i) => { const k = f.properties.okrug; const o = g.get(k) || { s: 0, w: 1 }; o.s += vals[i]; g.set(k, o); });
     $("dOkrugLabel").textContent = sum ? "По округам (сумма)" : "По округам (среднее по площади)";
     const rows = [...g].map(([k, o]) => ({ k, v: o.s / o.w })).sort((a, b) => (m.good === "low" ? a.v - b.v : b.v - a.v));
     const W = 320, rowH = 18, L = 44, R = 70, H = rows.length * rowH + 4, mx = Math.max(...rows.map((r) => r.v), 1e-9);
@@ -139,13 +146,14 @@ export function createDistricts({ map, $, state, BASE, beforeId, getMean, onChan
   }
   function rankOf(m, p) { // 1 = лучший
     const v = valOf(m, p); let better = 0;
-    for (const f of feats) { const w = valOf(m, f.properties); if (m.good === "low" ? w < v : w > v) better++; }
+    for (const f of visible()) { const w = valOf(m, pp(f)); if (m.good === "low" ? w < v : w > v) better++; }
     return better + 1;
   }
   const median = (a) => { const s = a.slice().sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
   function renderCard(id) {
     const f = byId.get(id); if (!f) return;
-    const p = f.properties, N = feats.length, card = $("dCard");
+    const p = pp(f), N = visible().length, card = $("dCard");
+    if (!p) { card.hidden = true; return; }
     card.hidden = false;
     const accAt = (T) => p.acc[T / T_MIN - 1];
     const tiles = [
@@ -162,7 +170,7 @@ export function createDistricts({ map, $, state, BASE, beforeId, getMean, onChan
       return `<div class="rk"><span class="rn">${m.name.replace("N", "60").replace("Охват за 60 мин", "Охват за час")}</span><span class="rb"><i style="width:${pct}%"></i></span><span class="rv">${r}-й</span></div>`;
     }).join("");
     // кривая охвата: район и медиана по Москве
-    const medAcc = Array.from({ length: 12 }, (_, k) => median(feats.map((x) => x.properties.acc[k])));
+    const medAcc = Array.from({ length: 12 }, (_, k) => median(visible().map((x) => pp(x).acc[k])));
     const ymaxRaw = Math.max(...p.acc, ...medAcc, 1), mag = 10 ** Math.floor(Math.log10(ymaxRaw)), ymax = Math.ceil(ymaxRaw / mag) * mag;
     const CW = 320, CH = 130, L = 36, R = 8, T = 8, B = 20, pw = CW - L - R, ph = CH - T - B, X = (t) => L + (t / 120) * pw, Y = (v) => T + ph - (v / ymax) * ph;
     const path = (arr) => `M${X(0)},${Y(0)}` + arr.map((v, k) => `L${X((k + 1) * 10).toFixed(1)},${Y(v).toFixed(1)}`).join("");

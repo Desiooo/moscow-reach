@@ -86,7 +86,7 @@ export function parseStreets(buf) {
 
 export class Reach {
   /** net — транспортная сеть, streets — результат parseStreets, barrierBits — распакованная маска препятствий. */
-  constructor(net, streets, barrierBits, coverBuf, moscowBuf) {
+  constructor(net, streets, barrierBits, coverBuf, moscowBuf, mkadBuf) {
     const b = net.bbox;
     this.mx0 = mercX(b.minLon); this.my0 = mercY(b.minLat);
     this.W = Math.ceil((mercX(b.maxLon) - this.mx0) / CS);
@@ -157,6 +157,17 @@ export class Reach {
         for (let x = 0; x < this.W; x++) { const ci = cy * cw + Math.floor((x * CELL) / CC); this.mos[y * this.W + x] = (bits[ci >> 3] >> (ci & 7)) & 1; }
       }
     }
+
+    // внутри МКАД (маска 60 м → ячейки растра); this.clip включает обрезку результатов по МКАД
+    this.mk = new Uint8Array(this.W * this.H).fill(1);
+    if (mkadBuf) {
+      const hdr = new Int32Array(mkadBuf.slice(0, 12)), cw = hdr[0], CC = hdr[2], bits = new Uint8Array(mkadBuf, 12);
+      for (let y = 0; y < this.H; y++) {
+        const cy = Math.floor((y * CELL) / CC);
+        for (let x = 0; x < this.W; x++) { const ci = cy * cw + Math.floor((x * CELL) / CC); this.mk[y * this.W + x] = (bits[ci >> 3] >> (ci & 7)) & 1; }
+      }
+    }
+    this.clip = false;
 
     // ---- транспорт: хабы
     const H = (this.nh = net.hubs.length / 2);
@@ -390,6 +401,9 @@ export class Reach {
     return out;
   }
 
+  /** Не учитывать Замкадье: результаты raster() обнуляются за пределами МКАД. */
+  setClip(on) { this.clip = !!on; }
+
   /** Углы картинки (верх-лево, верх-право, низ-право, низ-лево) для прямоугольника ячеек [x0,x1)×[y0,y1), y вверх. */
   cornersFor(x0, y0, x1, y1) {
     const X = (c) => unMercX(this.mx0 + c * CS), Y = (c) => unMercY(this.my0 + c * CS);
@@ -478,6 +492,7 @@ export class Reach {
         }
       }
     }
+    if (this.clip) { const mk = this.mk; for (let i = 0; i < best.length; i++) if (!mk[i]) best[i] = Infinity; } // Замкадье не учитываем
     // границы всей закрашенной области
     minx = W; maxx = 0; miny = H; maxy = 0;
     for (let y = 0; y < H; y++) { const row = y * W; for (let x = 0; x < W; x++) if (best[row + x] <= budget) { if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y; } }
@@ -552,16 +567,17 @@ export class Reach {
    * Возвращает { cum: км² с временем ≤ k·bin для k=1..nb, mosCum: то же внутри Москвы, mosKm2: площадь Москвы в растре }.
    */
   histogram(best, binSec, nb) {
-    const cnt = new Float64Array(nb + 1), mcnt = new Float64Array(nb + 1);
-    const { W, H, mos } = this, bb = this.bbox;
+    const cnt = new Float64Array(nb + 1), mcnt = new Float64Array(nb + 1), cntK = new Float64Array(nb + 1), mcntK = new Float64Array(nb + 1);
+    const { W, mos, mk } = this, bb = this.bbox;
     if (bb) for (let y = bb.y0; y < bb.y1; y++) for (let x = bb.x0, i = y * W + x; x < bb.x1; x++, i++) {
       const t = best[i]; if (t === Infinity) continue;
       const b = Math.ceil(t / binSec); if (b > nb) continue;
       cnt[b]++; if (mos[i]) mcnt[b]++;
+      if (mk[i]) { cntK[b]++; if (mos[i]) mcntK[b]++; }
     }
-    const k = (CELL * CELL) / 1e6, cum = new Float64Array(nb + 1), mcum = new Float64Array(nb + 1);
-    for (let b = 1; b <= nb; b++) { cum[b] = cum[b - 1] + cnt[b] * k; mcum[b] = mcum[b - 1] + mcnt[b] * k; }
-    if (!this.mosKm2) { let n = 0; for (let i = 0; i < mos.length; i++) n += mos[i]; this.mosKm2 = n * k; }
-    return { cum, mosCum: mcum, mosKm2: this.mosKm2 };
+    const k = (CELL * CELL) / 1e6, mkv = (c) => { const o = new Float64Array(nb + 1); for (let b = 1; b <= nb; b++) o[b] = o[b - 1] + c[b] * k; return o; };
+    if (this.mosKm2 == null) { let n = 0, nk = 0; for (let i = 0; i < mos.length; i++) { n += mos[i]; if (mos[i] && mk[i]) nk++; } this.mosKm2 = n * k; this.mosKm2K = nk * k; }
+    const cum = mkv(cnt), mcum = mkv(mcnt), cumK = mkv(cntK), mcumK = mkv(mcntK), c = this.clip;
+    return { cum: c ? cumK : cum, mosCum: c ? mcumK : mcum, mosKm2: c ? this.mosKm2K : this.mosKm2, cumAll: cum, cumK, mosCumK: mcumK };
   }
 }

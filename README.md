@@ -35,3 +35,6 @@ npm run dev
 - **Население** — плотность населения по точкам (GHSL GHS-POP, оценка на 2020 год, ячейки около 90 м), усреднённая по соседним ячейкам (сглаживание на выбор), плюс статистика по городу. Население учитывается и в «Зоне» (сколько жителей охвачено) и в «Районах» (население, плотность, доля жителей у метро). Данные: тайл R4_C22 с jeodpp.jrc.ec.europa.eu → `node scripts/build-population.mjs <tile.tif> public public/pop.bin.gz`.
 
 Данные о населении: Schiavina M., Freire S., Carioli A., MacManus K. (2023) GHS-POP R2023A, European Commission, JRC.
+
+## Без Замкадья
+Переключатель «Без Замкадья · только внутри МКАД» ограничивает всё (зону, удалённость, доступность, население, районы) территорией внутри МКАД. Маска строится заливкой по геометрии МКАД из OpenStreetMap: `./fetch` (см. запрос в истории) → `node scripts/build-mkad.mjs raw/mkad.json public/mkad.bin.gz`. Доступность и районы пересчитываются в двух вариантах (весь охват и только внутри МКАД): `node scripts/build-access.mjs public public/access.json`, затем `node scripts/build-districts.mjs public raw public/districts.json`.

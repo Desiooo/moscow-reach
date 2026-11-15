@@ -9,11 +9,12 @@ const NONE = [false, false, false, false, false, false];
 self.onmessage = (e) => {
   const m = e.data;
   if (m.type === "init") {
-    reach = new Reach(m.net, parseStreets(m.streets), new Uint8Array(m.barrier), m.cover, m.moscow);
+    reach = new Reach(m.net, parseStreets(m.streets), new Uint8Array(m.barrier), m.cover, m.moscow, m.mkad);
     self.postMessage({ type: "ready" });
     return;
   }
   if (!reach) return;
+  reach.setClip(!!m.clip);
   if (m.type === "curves") {
     const opts = { walkMs: m.walkMs, modes: m.modes, maxSec: 7200 };
     const bin = 300, nb = 24; // 5 минут × 24 = 2 часа

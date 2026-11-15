@@ -22,7 +22,7 @@ function gauss(src, w, h, sigma) { // отделяемое гауссово сг
   return out;
 }
 
-export function createPopulation({ map, $, state, reach, pop, pushImage, heatCv, stationNear, getMean, onChange }) {
+export function createPopulation({ map, $, state, reach, pop, pushImage, heatCv, stationNear, getMean, getClip, onChange }) {
   const { w, h, r, a } = pop;
   let dens = null, key = -1, mosC = null, ready = false;
 
@@ -30,6 +30,8 @@ export function createPopulation({ map, $, state, reach, pop, pushImage, heatCv,
   const mos = new Uint8Array(w * h);
   for (let Y = 0; Y < h; Y++) for (let X = 0; X < w; X++) mos[Y * w + X] = reach.mos[Math.min(reach.H - 1, Y * r + 2) * reach.W + Math.min(reach.W - 1, X * r + 2)];
   mosC = mos;
+  const mkC = new Uint8Array(w * h); // внутри МКАД
+  for (let Y = 0; Y < h; Y++) for (let X = 0; X < w; X++) mkC[Y * w + X] = reach.mk[Math.min(reach.H - 1, Y * r + 2) * reach.W + Math.min(reach.W - 1, X * r + 2)];
   // вода: блок 4×4 исходных ячеек на половину и больше занят препятствиями (реки; единичные пути не считаем)
   const wat = new Uint8Array(w * h);
   for (let Y = 0; Y < h; Y++) for (let X = 0; X < w; X++) { let c = 0; for (let j = 0; j < r; j++) for (let i = 0; i < r; i++) { const x = X * r + i, y = Y * r + j; if (x < reach.W && y < reach.H) c += reach.barrier[y * reach.W + x]; } wat[Y * w + X] = c >= (r * r) / 2 ? 1 : 0; }
@@ -60,7 +62,8 @@ export function createPopulation({ map, $, state, reach, pop, pushImage, heatCv,
     btns.forEach((b, i) => b.setAttribute("aria-pressed", i === state.ps));
     compute();
     const vals = [], mosVals = [];
-    for (let i = 0; i < dens.length; i++) if (dens[i] >= MIN_DENS) { vals.push(dens[i]); if (mos[i]) mosVals.push(dens[i]); }
+    const clip = getClip();
+    for (let i = 0; i < dens.length; i++) if (dens[i] >= MIN_DENS && (!clip || mkC[i])) { vals.push(dens[i]); if (mos[i]) mosVals.push(dens[i]); }
     const sc = makeScale(vals, getMean(), mosVals.length ? mosVals : vals);
     // картинка: одна ячейка — один пиксель (реки не закрашиваем)
     heatCv.canvas.width = w; heatCv.canvas.height = h;
@@ -69,7 +72,7 @@ export function createPopulation({ map, $, state, reach, pop, pushImage, heatCv,
       const row = (h - 1 - Y) * w;
       for (let X = 0; X < w; X++) {
         const v = dens[Y * w + X]; if (v < MIN_DENS) continue;
-        if (wat[Y * w + X]) continue;
+        if (wat[Y * w + X] || (clip && !mkC[Y * w + X])) continue;
         const c = lerpPal(VIR, 1 - sc.f(v)), o = (row + X) * 4; d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 178;
       }
     }
@@ -86,7 +89,8 @@ export function createPopulation({ map, $, state, reach, pop, pushImage, heatCv,
     // итоги по Москве
     let total = 0, cells = 0, peak = 0, peakI = -1;
     const order = [];
-    for (let i = 0; i < a.length; i++) if (mos[i]) { cells++; total += a[i]; if (a[i] > 0) order.push(i); if (dens[i] > peak) { peak = dens[i]; peakI = i; } }
+    const clip = getClip();
+    for (let i = 0; i < a.length; i++) if (mos[i] && (!clip || mkC[i])) { cells++; total += a[i]; if (a[i] > 0) order.push(i); if (dens[i] > peak) { peak = dens[i]; peakI = i; } }
     const area = cells * CELL_KM2;
     $("pTotal").textContent = fmtPop(total);
     $("pAvg").textContent = fmtDens(total / area);
@@ -97,7 +101,7 @@ export function createPopulation({ map, $, state, reach, pop, pushImage, heatCv,
     $("pPeak").textContent = fmtDens(peak);
     // распределение жителей по плотности
     const share = new Float64Array(BANDS.length + 1);
-    for (let i = 0; i < a.length; i++) if (mos[i] && a[i] > 0) { let b = 0; while (b < BANDS.length && dens[i] >= BANDS[b]) b++; share[b] += a[i]; }
+    for (let i = 0; i < a.length; i++) if (mos[i] && (!clip || mkC[i]) && a[i] > 0) { let b = 0; while (b < BANDS.length && dens[i] >= BANDS[b]) b++; share[b] += a[i]; }
     const labels = ["< 2", "2–5", "5–10", "10–15", "15–25", "> 25"], W = 320, H = 130, L = 8, T = 16, B = 26, pw = W - 2 * L, ph = H - T - B, bw = pw / share.length, mx = Math.max(...share);
     let s = "";
     share.forEach((v, k) => {
@@ -127,6 +131,8 @@ export function createPopulation({ map, $, state, reach, pop, pushImage, heatCv,
   map.on("mousemove", (e) => {
     const tip = $("tip");
     if (state.view !== "pop") return;
+    const [cx, cy] = reach.lonLatToCell(e.lngLat.lng, e.lngLat.lat);
+    if (getClip() && !reach.mk[Math.floor(cy) * reach.W + Math.floor(cx)]) { tip.style.display = "none"; return; }
     const v = densityAt(e.lngLat.lng, e.lngLat.lat);
     if (v == null) { tip.style.display = "none"; return; }
     tip.textContent = `≈ ${fmtDens(v)} жителей`; tip.style.display = "block"; tip.style.left = `${e.point.x + 14}px`; tip.style.top = `${e.point.y + 14}px`;

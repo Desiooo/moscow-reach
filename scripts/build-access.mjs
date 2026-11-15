@@ -13,7 +13,7 @@ const MODES = [true, true, true, true, true, true];
 function load(dir) {
   const un = (f) => { const b = zlib.gunzipSync(fs.readFileSync(`${dir}/${f}`)); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); };
   const net = JSON.parse(fs.readFileSync(`${dir}/network.json`, 'utf8'));
-  return new Reach(net, parseStreets(un('streets.bin.gz')), new Uint8Array(un('barrier.bin.gz')), un('cover.bin.gz'), un('moscow.bin.gz'));
+  return new Reach(net, parseStreets(un('streets.bin.gz')), new Uint8Array(un('barrier.bin.gz')), un('cover.bin.gz'), un('moscow.bin.gz'), un('mkad.bin.gz'));
 }
 
 if (isMainThread) {
@@ -25,7 +25,7 @@ if (isMainThread) {
     if (!r.cov[i]) continue;
     if (!r.snap(cx, cy, 16)) continue; // нужны улицы рядом
     const [lon, lat] = r.cornersFor(cx, cy, cx, cy)[0];
-    origins.push({ ix, iy, lon, lat, mos: r.mos[i] ? 1 : 0 });
+    origins.push({ ix, iy, lon, lat, mos: r.mos[i] ? 1 : 0, mk: r.mk[i] ? 1 : 0 });
   }
   console.log('стартов', origins.length, 'в Москве', origins.filter((o) => o.mos).length);
   const n = Math.max(1, Math.min(os.availableParallelism() - 3, 12));
@@ -48,8 +48,8 @@ if (isMainThread) {
       feed();
     });
     w.on('exit', () => { if (--alive === 0) {
-      const pts = origins.map((o, i) => [o.ix, o.iy, o.mos, ...out[i]]);
-      fs.writeFileSync(outFile, JSON.stringify({ sp: SP, step: 10, pts }));
+      const pts = origins.map((o, i) => [o.ix, o.iy, o.mos, o.mk, ...out[i]]);
+      fs.writeFileSync(outFile, JSON.stringify({ sp: SP, step: 10, nT: 12, pts }));
       console.log('готово', pts.length, 'точек,', fs.statSync(outFile).size, 'байт,', Math.round((Date.now() - t0) / 1000), 'с');
     } });
   }
@@ -59,10 +59,10 @@ if (isMainThread) {
   parentPort.on('message', (job) => {
     if (!job) { process.exit(0); return; }
     const res = job.items.map((o) => {
-      if (!r.run(o.lon, o.lat, { walkMs: WALK_MS, modes: MODES, maxSec: 7200 })) return new Array(12).fill(0);
+      if (!r.run(o.lon, o.lat, { walkMs: WALK_MS, modes: MODES, maxSec: 7200 })) return new Array(24).fill(0);
       const best = r.raster(7200);
       const h = r.histogram(best, 600, 12);
-      return Array.from(h.cum.slice(1), (v) => Math.round(v));
+      return [...Array.from(h.cumAll.slice(1), (v) => Math.round(v)), ...Array.from(h.cumK.slice(1), (v) => Math.round(v))]; // [весь охват ×12, только внутри МКАД ×12]
     });
     parentPort.postMessage({ from: job.from, res });
   });

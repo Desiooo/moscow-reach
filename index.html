@@ -87,6 +87,7 @@
     .rank li .nm small { display: block; color: var(--muted); font-size: 11.5px; }
     .rank li .v { font-variant-numeric: tabular-nums; font-weight: 600; flex: none; }
 
+    #err { position: absolute; z-index: 5; left: 50%; bottom: 14px; transform: translateX(-50%); max-width: min(560px, 92vw); background: #7a1f1f; color: #fff; padding: 8px 14px; border-radius: 10px; font-size: 13px; box-shadow: var(--shadow); }
     #busy { position: absolute; z-index: 3; top: 16px; right: 64px; background: var(--bg); padding: 6px 12px; border-radius: 999px; box-shadow: var(--shadow); font-size: 13px; display: none; }
     #tip { position: absolute; z-index: 4; pointer-events: none; background: var(--bg); color: var(--ink); padding: 5px 9px; border-radius: 8px; box-shadow: var(--shadow); font-size: 12.5px; white-space: nowrap; display: none; }
     .pin { width: 22px; height: 22px; border-radius: 50%; background: #e8483b; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.4); cursor: grab; }
@@ -103,6 +104,7 @@
   <div id="map"></div>
   <div id="busy">Считаю…</div>
   <div id="tip"></div>
+  <div id="err" hidden></div>
   <section id="panel">
     <div class="tabs" id="tabs" role="group" aria-label="Режим">
       <button data-v="zone" aria-pressed="true">Зона</button>
@@ -111,6 +113,8 @@
       <button data-v="districts" aria-pressed="false">Районы</button>
       <button data-v="pop" aria-pressed="false">Население</button>
     </div>
+
+    <div class="chips" style="margin:-4px 0 12px"><button class="chip" id="chipMkad" aria-pressed="false" title="Не учитывать территорию за МКАД: зона, статистика, карты и районы считаются только внутри кольца">Без Замкадья · только внутри МКАД</button></div>
 
     <!-- ===== Зона досягаемости ===== -->
     <div id="vZone">
@@ -265,6 +269,7 @@
     <details>
       <summary>Как это считается</summary>
       <p>Маршруты и остановки — из OpenStreetMap. Расписаний нет: время ожидания — половина типового интервала (метро ≈ 4,5 мин, автобус ≈ 10 мин и т. д.), скорости заданы по виду транспорта. Пешком — только по улицам, дорожкам и мостам; реки и железные дороги — препятствия. Это оценка «будний день, днём», а не расписание.</p>
+      <p id="ver"></p>
     </details>
   </section>
   <script type="module" src="/main.js"></script>

@@ -33,6 +33,7 @@ const state = {
   pace: 1,
   view: "zone", // zone | remote | access | districts | pop
   ps: 2, // сглаживание населения
+  mkad: false, // не учитывать Замкадье
   aT: 60,
   mean: "arith", // середина шкалы: arith | geo | quad
   dMetric: "acc", dSel: null,
@@ -45,6 +46,7 @@ try {
   const m = q.get("m"); if (m && /^[01]{5}$/.test(m)) state.groups = [...m].map((c) => c === "1");
   if (q.has("p")) { const p = Number(q.get("p")); if (p >= 0 && p < PACES.length) state.pace = p; }
   if (["remote", "access", "districts", "pop"].includes(q.get("v"))) state.view = q.get("v");
+  if (q.get("mk") === "1") state.mkad = true;
   if (q.has("ps")) { const ps = Number(q.get("ps")); if (ps >= 0 && ps <= 3) state.ps = ps; }
   if (["arith", "geo", "quad"].includes(q.get("sk"))) state.mean = q.get("sk");
   if (q.get("dm")) state.dMetric = q.get("dm");
@@ -69,6 +71,10 @@ map.on("error", (e) => console.warn("map error:", e.error?.message || e.message)
 if (import.meta.env.DEV) window.__map = map;
 
 // ---------- вспомогательное ----------
+const showErr = (m) => { const e = document.getElementById("err"); if (e) { e.hidden = false; e.textContent = `Ошибка: ${m}. Обновите страницу (Cmd+Shift+R). Если не пройдёт — напишите, что именно не работает.`; } };
+window.addEventListener("error", (e) => showErr(e.message || "сбой скрипта"));
+window.addEventListener("unhandledrejection", (e) => showErr(e.reason?.message || String(e.reason)));
+try { document.getElementById("ver").textContent = `Версия сборки: ${new Date(Number(__BUILD__)).toLocaleString("ru")}`; } catch {}
 const $ = (id) => document.getElementById(id);
 const BLANK = "data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==";
 const fmtMin = (m) => (m >= 60 ? `${Math.floor(m / 60)} ч ${Math.round(m % 60)} мин` : `${Math.round(m)} мин`);
@@ -143,6 +149,17 @@ $("slider").oninput = () => { state.minutes = Number($("slider").value); changed
 $("aSlider").value = state.aT;
 $("aSlider").oninput = () => { state.aT = Number($("aSlider").value); renderAccess(); syncUrl(); };
 for (const b of document.querySelectorAll("#tabs button")) b.onclick = () => setView(b.dataset.v);
+$("chipMkad").setAttribute("aria-pressed", state.mkad);
+$("chipMkad").onclick = () => {
+  state.mkad = !state.mkad; $("chipMkad").setAttribute("aria-pressed", state.mkad);
+  if (!reach) return;
+  reach.setClip(state.mkad); syncUrl(); $("tip").style.display = "none";
+  if (state.view === "zone") { changed(false); const modes = currentModes(); if (!state.transit) modes.fill(false); scheduleCurves(modes, (PACES[state.pace].kmh * 1000) / 3600); }
+  else if (state.view === "remote") loadRemote();
+  else if (state.view === "access") renderAccess();
+  else if (state.view === "districts") dist?.render();
+  else popMod?.render();
+};
 const scaleBtns = MEANS.map((m) => mkChip($("scaleChips"), m.name, m.id === state.mean, () => {
   state.mean = m.id; scaleBtns.forEach((b, j) => b.setAttribute("aria-pressed", MEANS[j].id === state.mean));
   if (state.view === "access") renderAccess(); else if (state.view === "districts") dist?.render(); else if (state.view === "pop") popMod?.render();
@@ -197,11 +214,15 @@ function changed(rerun) {
 
 const scratch = { buf: null };
 function popInZone(best, budget, bb) { // сумма жителей по ячейкам зоны (население ячейки 120 м делим на 16 ячеек по 30 м)
-  const { W } = reach, { w, r, a } = popGrid, k = 1 / (r * r);
-  if (popGrid.mosTotal == null) { let t = 0; for (let Y = 0; Y < popGrid.h; Y++) for (let X = 0; X < w; X++) if (reach.mos[Math.min(reach.H - 1, Y * r + 2) * W + Math.min(W - 1, X * r + 2)]) t += a[Y * w + X]; popGrid.mosTotal = t; }
+  const { W } = reach, { w, r, a } = popGrid, k = 1 / (r * r), clip = reach.clip;
+  if (popGrid.mosTotals == null) {
+    let t = 0, tk = 0;
+    for (let Y = 0; Y < popGrid.h; Y++) for (let X = 0; X < w; X++) { const fi = Math.min(reach.H - 1, Y * r + 2) * W + Math.min(W - 1, X * r + 2); if (reach.mos[fi]) { t += a[Y * w + X]; if (reach.mk[fi]) tk += a[Y * w + X]; } }
+    popGrid.mosTotals = [t, tk];
+  }
   let total = 0, mos = 0;
   if (bb) for (let y = bb.y0; y < bb.y1; y++) for (let x = bb.x0, i = y * W + x; x < bb.x1; x++, i++) if (best[i] <= budget) { const p = a[Math.floor(y / r) * w + Math.floor(x / r)] * k; total += p; if (reach.mos[i]) mos += p; }
-  return { total, mos, mosTotal: popGrid.mosTotal };
+  return { total, mos, mosTotal: popGrid.mosTotals[clip ? 1 : 0] };
 }
 function update() {
   if (!reach || state.view !== "zone") return;
@@ -252,8 +273,8 @@ function update() {
   $("tShare").textContent = h.mosKm2 ? `${Math.min(100, (h.mosCum[1] / h.mosKm2) * 100).toFixed(h.mosCum[1] / h.mosKm2 < 0.1 ? 1 : 0)}%`.replace(".", ",") : "—";
   const sc = reach.countStops(budget, 0);
   $("tStations").textContent = `${sc.stations}`; $("tHubs").textContent = sc.hubs.toLocaleString("ru");
-  const pz = popInZone(best, budget, bb);
-  $("tPop").textContent = pz.total >= 1e6 ? `${(pz.total / 1e6).toFixed(1).replace(".", ",")} млн` : `${Math.round(pz.total / 1e3)} тыс.`;
+  const pz = popGrid ? popInZone(best, budget, bb) : { total: 0, mos: 0, mosTotal: 0 };
+  $("tPop").textContent = !popGrid ? "—" : pz.total >= 1e6 ? `${(pz.total / 1e6).toFixed(1).replace(".", ",")} млн` : `${Math.round(pz.total / 1e3)} тыс.`;
   $("tPopShare").textContent = pz.mosTotal ? `${Math.round((pz.mos / pz.mosTotal) * 100)}%` : "—";
   drawZoneChart();
   syncUrl();
@@ -263,13 +284,13 @@ function update() {
 // ---- график площади по времени (считается в фоне)
 let curves = null, curveKey = "", curveId = 0, curveTimer = 0;
 function scheduleCurves(modes, walkMs) {
-  const key = [state.lon.toFixed(5), state.lat.toFixed(5), state.pace, modes.join("")].join("|");
+  const key = [state.lon.toFixed(5), state.lat.toFixed(5), state.pace, modes.join(""), state.mkad ? 1 : 0].join("|");
   if (key === curveKey) return;
   curveKey = key; curves = null;
   $("zoneBusy").textContent = "Считаю график…";
   drawZoneChart();
   clearTimeout(curveTimer);
-  curveTimer = setTimeout(() => { worker?.postMessage({ type: "curves", id: ++curveId, lon: state.lon, lat: state.lat, walkMs, modes }); }, 500);
+  curveTimer = setTimeout(() => { worker?.postMessage({ type: "curves", id: ++curveId, lon: state.lon, lat: state.lat, walkMs, modes, clip: state.mkad }); }, 500);
 }
 
 const interp = (arr, minutes) => { // arr[k] — значение при (k+1)·5 мин
@@ -308,13 +329,13 @@ function currentModes() {
 function loadRemote() {
   if (!worker) return;
   const modes = currentModes(), walkMs = (PACES[state.pace].kmh * 1000) / 3600;
-  const key = [state.pace, modes.join("")].join("|");
+  const key = [state.pace, modes.join(""), state.mkad ? 1 : 0].join("|");
   if (remote && key === remoteKey) { renderRemote(); return; }
   remoteKey = key; remote = null;
   map.getSource("heat").updateImage({ url: BLANK, coordinates: reach.corners });
   $("remoteBusy").textContent = "Считаю маршруты от центра до всего города…";
   $("busy").style.display = "block"; $("busy").textContent = "Считаю…";
-  worker.postMessage({ type: "remote", id: ++remoteId, lon: CENTER[0], lat: CENTER[1], walkMs, modes });
+  worker.postMessage({ type: "remote", id: ++remoteId, lon: CENTER[0], lat: CENTER[1], walkMs, modes, clip: state.mkad });
 }
 function renderRemote() {
   if (!remote || state.view !== "remote") return;
@@ -358,7 +379,7 @@ async function loadAccess() {
   if (!access && !accessTried) {
     accessTried = true;
     $("busy").style.display = "block"; $("busy").textContent = "Загружаю данные…";
-    try { access = await (await fetch(`${BASE}access.json`)).json(); }
+    try { access = await (await fetch(`${BASE}access.json?v=${__BUILD__}`)).json(); }
     catch { access = null; }
     $("busy").style.display = "none";
   }
@@ -367,6 +388,7 @@ async function loadAccess() {
 }
 function accessValueAt(lon, lat) { // значение из выборки в точке (билинейно), null вне покрытия
   const [cx, cy] = reach.lonLatToCell(lon, lat);
+  if (state.mkad) { const ci = Math.floor(cy) * reach.W + Math.floor(cx); if (!reach.mk[ci]) return null; }
   return sampleAccess(cx, cy);
 }
 function sampleAccess(cx, cy) {
@@ -391,9 +413,10 @@ function renderAccess() {
   $("aMins").textContent = T;
   const nx = Math.ceil(reach.W / SP) + 1, ny = Math.ceil(reach.H / SP) + 1, a = new Float32Array(nx * ny).fill(-1);
   const moscow = [];
-  for (const p of access.pts) { const v = p[3 + ti]; a[p[1] * nx + p[0]] = v; if (p[2]) moscow.push({ v, ix: p[0], iy: p[1] }); }
+  const off = state.mkad ? 4 + access.nT : 4, pts = state.mkad ? access.pts.filter((p) => p[3]) : access.pts; // [ix,iy,mos,mk, весь охват×12, внутри МКАД×12]
+  for (const p of pts) { const v = p[off + ti]; a[p[1] * nx + p[0]] = v; if (p[2]) moscow.push({ v, ix: p[0], iy: p[1] }); }
   vals = { a, nx, ny };
-  const allVals = access.pts.map((p) => p[3 + ti]), mosVals = moscow.map((m) => m.v);
+  const allVals = pts.map((p) => p[off + ti]), mosVals = moscow.map((m) => m.v);
   const sc = makeScale(allVals, state.mean, mosVals); // от самого малого до самого большого значения, без «среза»
   const sorted = mosVals.slice().sort((x, y) => x - y);
   // картинка: грубая сетка (4 ячейки на пиксель), мягкая интерполяция между стартами; реки пустые
@@ -404,7 +427,7 @@ function renderAccess() {
     const row = (chei - 1 - Y) * cwid;
     for (let X = 0; X < cwid; X++) {
       const cx = (X + 0.5) * R, cy = (Y + 0.5) * R, ci = Math.floor(cy) * W + Math.floor(cx);
-      if (!cov[ci] || barrier[ci]) continue;
+      if (!cov[ci] || barrier[ci] || (state.mkad && !reach.mk[ci])) continue;
       const v = sampleAccess(cx, cy); if (v == null) continue;
       const c = lerpPal(VIR, 1 - sc.f(v)); // больше площадь → ярче
       const o = (row + X) * 4; d[o] = c[0]; d[o + 1] = c[1]; d[o + 2] = c[2]; d[o + 3] = 175;
@@ -450,6 +473,7 @@ function syncUrl() {
   if (state.view !== "zone") p.set("v", state.view);
   if (state.view === "pop" && state.ps !== 2) p.set("ps", state.ps);
   if (state.mean !== "arith") p.set("sk", state.mean);
+  if (state.mkad) p.set("mk", 1);
   if (state.view === "districts") { p.set("dm", state.dMetric); if (state.dSel != null) p.set("d", state.dSel); }
   p.set("o", `${state.lat.toFixed(5)},${state.lon.toFixed(5)}`);
   p.set("t", state.minutes);
@@ -479,22 +503,24 @@ map.on("load", async () => {
     if (head[0] !== 0x1f || head[1] !== 0x8b) return buf;
     return new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
   };
-  const [net, streetsBuf, barrierBuf, coverBuf, moscowBuf, metro, popBuf] = await Promise.all([
-    fetch(`${BASE}network.json`).then((r) => r.json()),
-    gunzip(`${BASE}streets.bin.gz`),
-    gunzip(`${BASE}barrier.bin.gz`),
-    gunzip(`${BASE}cover.bin.gz`),
-    gunzip(`${BASE}moscow.bin.gz`),
-    fetch(`${BASE}metro.json`).then((r) => r.json()),
-    gunzip(`${BASE}pop.bin.gz`),
+  const [net, streetsBuf, barrierBuf, coverBuf, moscowBuf, metro, popBuf, mkadBuf] = await Promise.all([
+    fetch(`${BASE}network.json?v=${__BUILD__}`).then((r) => r.json()),
+    gunzip(`${BASE}streets.bin.gz?v=${__BUILD__}`),
+    gunzip(`${BASE}barrier.bin.gz?v=${__BUILD__}`),
+    gunzip(`${BASE}cover.bin.gz?v=${__BUILD__}`),
+    gunzip(`${BASE}moscow.bin.gz?v=${__BUILD__}`),
+    fetch(`${BASE}metro.json?v=${__BUILD__}`).then((r) => r.json()),
+    gunzip(`${BASE}pop.bin.gz?v=${__BUILD__}`).catch((e) => { showErr(`не загрузились данные о населении (${e.message})`); return null; }),
+    gunzip(`${BASE}mkad.bin.gz?v=${__BUILD__}`).catch((e) => { showErr(`не загрузилась граница МКАД (${e.message})`); return null; }),
   ]);
   $("busy").textContent = "Строю граф улиц…";
   await new Promise((r) => setTimeout(r, 30)); // дать перерисоваться подписи
-  reach = new Reach(net, parseStreets(streetsBuf), new Uint8Array(barrierBuf), coverBuf, moscowBuf);
+  reach = new Reach(net, parseStreets(streetsBuf), new Uint8Array(barrierBuf), coverBuf, moscowBuf, mkadBuf);
+  reach.setClip(state.mkad);
   stations = metro.features.filter((f) => f.properties.kind === "station" && f.properties.metro === true).map((f) => ({ name: f.properties.name, lon: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] }));
   reach.setStations(stations.map((s) => [s.lon, s.lat]));
 
-  { const hdr = new Int32Array(popBuf.slice(0, 12)); popGrid = { w: hdr[0], h: hdr[1], r: hdr[2], a: new Float32Array(popBuf.slice(12)) }; }
+  if (popBuf) { const hdr = new Int32Array(popBuf.slice(0, 12)); popGrid = { w: hdr[0], h: hdr[1], r: hdr[2], a: new Float32Array(popBuf.slice(12)) }; }
 
   // воркер с собственной копией движка для тяжёлых расчётов (буферы передаём ему)
   try {
@@ -509,7 +535,7 @@ map.on("load", async () => {
         remote = m; renderRemote();
       }
     };
-    worker.postMessage({ type: "init", net, streets: streetsBuf, barrier: barrierBuf, cover: coverBuf, moscow: moscowBuf }, [streetsBuf, barrierBuf, coverBuf, moscowBuf]);
+    worker.postMessage({ type: "init", net, streets: streetsBuf, barrier: barrierBuf, cover: coverBuf, moscow: moscowBuf, mkad: mkadBuf ? mkadBuf.slice(0) : undefined }, [streetsBuf, barrierBuf, coverBuf, moscowBuf]);
   } catch (e) { console.warn("воркер недоступен", e); }
 
   const firstSymbol = map.getStyle().layers.find((l) => l.type === "symbol")?.id;
@@ -528,7 +554,7 @@ map.on("load", async () => {
   map.addLayer({ id: "mcd-stations", type: "circle", minzoom: 12, source: "metro", filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], false]], paint: { "circle-radius": W(0.8, 1.8, 3.5), "circle-color": "#fff", "circle-stroke-width": 0.8, "circle-stroke-color": "#555" } }, firstSymbol);
   map.addLayer({ id: "metro-labels", type: "symbol", source: "metro", minzoom: 12.5, filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], true]], layout: { "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": ["interpolate", ["linear"], ["zoom"], 12.5, 10, 16, 13], "text-offset": [0, 0.8], "text-anchor": "top", "text-optional": true }, paint: { "text-color": "#222", "text-halo-color": "#fff", "text-halo-width": 1.5 } });
   // ---- границы Москвы
-  map.addSource("boundary", { type: "geojson", data: `${BASE}boundary.json` });
+  map.addSource("boundary", { type: "geojson", data: `${BASE}boundary.json?v=${__BUILD__}` });
   map.addLayer({ id: "boundary-casing", type: "line", source: "boundary", layout: { "line-join": "round" }, paint: { "line-color": "#fff", "line-opacity": 0.8, "line-width": ["interpolate", ["linear"], ["zoom"], 8, 2.5, 14, 5] } }, firstSymbol);
   map.addLayer({ id: "boundary", type: "line", source: "boundary", layout: { "line-join": "round" }, paint: { "line-color": "#c0392b", "line-dasharray": [4, 2], "line-width": ["interpolate", ["linear"], ["zoom"], 8, 1.2, 14, 2.4] } }, firstSymbol);
   const bchip = $("chipBoundary");
@@ -537,8 +563,8 @@ map.on("load", async () => {
   const chip = $("chipMetro");
   chip.onclick = () => { const on = chip.getAttribute("aria-pressed") !== "true"; chip.setAttribute("aria-pressed", on); for (const id of METRO_LAYERS) map.setLayoutProperty(id, "visibility", on ? "visible" : "none"); };
 
-  popMod = createPopulation({ map, $, state, reach, pop: popGrid, pushImage, heatCv, stationNear, getMean: () => state.mean, onChange: syncUrl });
-  dist = createDistricts({ map, $, state, BASE, beforeId: "metro-casing", getMean: () => state.mean, onChange: syncUrl });
+  if (popGrid) popMod = createPopulation({ map, $, state, reach, pop: popGrid, pushImage, heatCv, stationNear, getMean: () => state.mean, getClip: () => state.mkad, onChange: syncUrl });
+  dist = createDistricts({ map, $, state, BASE, beforeId: "metro-casing", getMean: () => state.mean, getClip: () => state.mkad, onChange: syncUrl });
 
   const el = document.createElement("div"); el.className = "pin";
   pin = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([state.lon, state.lat]).addTo(map);
@@ -559,5 +585,5 @@ map.on("load", async () => {
 
   $("busy").style.display = "none";
   applyView();
-  if (state.view === "zone") update(); else if (state.view === "access") loadAccess(); else if (state.view === "districts") dist.show(); else if (state.view === "pop") popMod.render(); else loadRemote(); // сообщения воркеру встают в очередь за init
+  if (state.view === "zone") update(); else if (state.view === "access") loadAccess(); else if (state.view === "districts") dist.show(); else if (state.view === "pop") popMod?.render(); else loadRemote(); // сообщения воркеру встают в очередь за init
 });
