@@ -240,6 +240,13 @@ map.on("load", async () => {
   map.addLayer({ id: "metro-stations", type: "circle", source: "metro", filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], true]], paint: { "circle-radius": W(0.8, 2.4, 5.5), "circle-color": "#fff", "circle-stroke-width": W(0.5, 1.1, 2), "circle-stroke-color": ["case", ["==", ["get", "n"], 1], ["get", "colours"], "#2b2b2b"] } }, firstSymbol);
   map.addLayer({ id: "mcd-stations", type: "circle", minzoom: 12, source: "metro", filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], false]], paint: { "circle-radius": W(0.8, 1.8, 3.5), "circle-color": "#fff", "circle-stroke-width": 0.8, "circle-stroke-color": "#555" } }, firstSymbol);
   map.addLayer({ id: "metro-labels", type: "symbol", source: "metro", minzoom: 12.5, filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], true]], layout: { "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": ["interpolate", ["linear"], ["zoom"], 12.5, 10, 16, 13], "text-offset": [0, 0.8], "text-anchor": "top", "text-optional": true }, paint: { "text-color": "#222", "text-halo-color": "#fff", "text-halo-width": 1.5 } });
+  // ---- границы Москвы
+  map.addSource("boundary", { type: "geojson", data: `${BASE}boundary.json` });
+  map.addLayer({ id: "boundary-casing", type: "line", source: "boundary", layout: { "line-join": "round" }, paint: { "line-color": "#fff", "line-opacity": 0.8, "line-width": ["interpolate", ["linear"], ["zoom"], 8, 2.5, 14, 5] } }, firstSymbol);
+  map.addLayer({ id: "boundary", type: "line", source: "boundary", layout: { "line-join": "round" }, paint: { "line-color": "#c0392b", "line-dasharray": [4, 2], "line-width": ["interpolate", ["linear"], ["zoom"], 8, 1.2, 14, 2.4] } }, firstSymbol);
+  const bchip = $("chipBoundary");
+  bchip.onclick = () => { const on = bchip.getAttribute("aria-pressed") !== "true"; bchip.setAttribute("aria-pressed", on); for (const id of ["boundary-casing", "boundary"]) map.setLayoutProperty(id, "visibility", on ? "visible" : "none"); };
+
   const METRO_LAYERS = ["metro-casing", "mcd-lines", "metro-lines", "metro-stations", "mcd-stations", "metro-labels"];
   const setMetro = (on) => { for (const id of METRO_LAYERS) map.setLayoutProperty(id, "visibility", on ? "visible" : "none"); };
   const chip = $("chipMetro");
