@@ -19,7 +19,9 @@ const metroSt = stationsAll.filter((f) => f.properties.metro === true);
 reach.setStations(metroSt.map((f) => f.geometry.coordinates));
 
 // ---- население (people на ячейку 120 м) → на ячейку 30 м
-const popBuf = un('pop.bin.gz'), ph = new Int32Array(popBuf.slice(0, 12)), PW = ph[0], PR = ph[2], popArr = new Float32Array(popBuf.slice(12));
+const rawPop = (() => { const b = zlib.gunzipSync(fs.readFileSync(`${raw}/pop-ghsl.bin.gz`)); return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); })();
+const ph = new Int32Array(rawPop.slice(0, 12)), PW = ph[0], PH = ph[1], PR = ph[2];
+let popArr = new Float32Array(rawPop.slice(12)); // сначала — модель GHSL; ниже подменяется калиброванной
 const popAt = (x, y) => popArr[Math.floor(y / PR) * PW + Math.floor(x / PR)] / (PR * PR);
 
 // ---- районы и округа
@@ -83,6 +85,44 @@ for (const d of districts) {
   }
 }
 const N = districts.length;
+// ---- калибровка населения по официальным данным (Википедия, Росстат, 2025): сумма по району = официальная,
+// распределение внутри района — по модели GHSL; где модель сильно промахнулась, подмешиваем длину улиц как признак застройки
+{
+  const normName = (t) => t.replace(/ё/g, 'е').replace(/^район /, '').replace(/ район$/, '').trim().toLowerCase();
+  const wiki = new Map(fs.readFileSync(new URL('../data/wiki-districts-2025.tsv', import.meta.url), 'utf8').trim().split('\n').map((l) => { const [n, p2, a] = l.split('|'); return [normName(n), { pop: +p2, area: +a }]; }));
+  for (const d of districts) d.wiki = wiki.get(normName(d.name)) || null;
+  const sLen = new Float32Array(W * H);
+  for (let k = 0; k < reach.eu.length; k++) {
+    const u = reach.eu[k], v = reach.ev[k], mx = (reach.gx[u] + reach.gx[v]) / 2, my = (reach.gy[u] + reach.gy[v]) / 2;
+    const x = Math.floor(mx), y = Math.floor(my); if (x >= 0 && y >= 0 && x < W && y < H) sLen[y * W + x] += Math.hypot(reach.gx[u] - reach.gx[v], reach.gy[u] - reach.gy[v]) * CELL;
+  }
+  const G = new Float64Array(N + 1), S = new Float64Array(N + 1), C = new Float64Array(N + 1);
+  for (let i = 0; i < W * H; i++) { const l = label[i]; if (!l) continue; G[l] += popAt(i % W, (i / W) | 0); S[l] += sLen[i]; C[l]++; }
+  const alpha = new Float64Array(N + 1), target = new Float64Array(N + 1);
+  const factors = [];
+  for (const d of districts) {
+    const id = d.id; d.popRaw = G[id];
+    if (!d.wiki) { target[id] = G[id]; alpha[id] = 1; continue; }
+    target[id] = d.wiki.pop;
+    const f = G[id] > 0 ? d.wiki.pop / G[id] : Infinity; factors.push([d.name, f, G[id], d.wiki.pop]);
+    alpha[id] = G[id] < 1000 ? 0 : f >= 0.5 && f <= 2 ? 1 : 0.5;
+    if (S[id] === 0) alpha[id] = 1;
+  }
+  const popNew = new Float32Array(popArr.length);
+  for (let i = 0; i < W * H; i++) {
+    const x = i % W, y = (i / W) | 0, l = label[i], ci = Math.floor(y / PR) * PW + Math.floor(x / PR);
+    const g = popAt(x, y);
+    if (!l) { popNew[ci] += g; continue; }
+    const a = alpha[l], wg = G[l] > 0 ? g / G[l] : 0, ws = S[l] > 0 ? sLen[i] / S[l] : 1 / C[l];
+    popNew[ci] += target[l] * (a * wg + (1 - a) * ws);
+  }
+  popArr = popNew;
+  factors.sort((a, b) => a[1] - b[1]);
+  console.log('калибровка: сумма было', Math.round(G.reduce((a, b) => a + b, 0)), 'стало', Math.round(target.reduce((a, b) => a + b, 0)));
+  console.log('самые большие поправки:', factors.slice(0, 3).map((x) => `${x[0]} ×${x[1].toFixed(2)}`).join(', '), '...', factors.slice(-3).map((x) => `${x[0]} ×${x[1].toFixed(2)}`).join(', '));
+  fs.writeFileSync(`${dir}/pop.bin.gz`, zlib.gzipSync(Buffer.concat([Buffer.from(Int32Array.from([PW, PH, PR]).buffer), Buffer.from(popArr.buffer)]), { level: 9 }));
+}
+const popRawById = {}; for (const d of districts) popRawById[d.id] = d.popRaw;
 const cellKm2 = (CELL * CELL) / 1e6;
 const SP = access.sp, nT = 12;
 
@@ -147,7 +187,7 @@ function aggregate(label, accOff) {
     out.set(id, {
       c: [Math.round(clon * 1e4) / 1e4, Math.round(clat * 1e4) / 1e4],
       area: r1(km2), water: r2(barr[id] / n),
-      pop: Math.round(popD[id]), dens: Math.round(popD[id] / km2), popM10: popD[id] ? r2(popM10[id] / popD[id]) : null, popM15: popD[id] ? r2(popM15[id] / popD[id]) : null, popS5: popD[id] ? r2(popS5[id] / popD[id]) : null,
+      popModel: Math.round(popRawById[id] || 0), pop: Math.round(popD[id]), dens: Math.round(popD[id] / km2), popM10: popD[id] ? r2(popM10[id] / popD[id]) : null, popM15: popD[id] ? r2(popM15[id] / popD[id]) : null, popS5: popD[id] ? r2(popS5[id] / popD[id]) : null,
       metro: stMetro[id], mcd: stMcd[id], stops: hubs[id], streetKm: r1(streetM[id] / 1000),
       acc: Array.from(accSum[id], (v) => Math.round(v / accN[id])), accN: accN[id], accFallback: fallback[id] ? 1 : 0,
       toCenter: { mean: reached ? r1(sum / reached) : null, p50: pct(0.5), p90: pct(0.9), reached: r2(reached / n), bands },

@@ -14,8 +14,8 @@ const METRICS = [
   { id: "metro", name: "Пешком до метро", unit: "мин", good: "low", get: (p) => p.metroWalk.mean, fmt: (v) => `${fmt1(v)} мин`, hint: "Средняя пешая дорога до ближайшей станции метро или МЦК (по улицам; места дальше 30 мин считаются за 30)." },
   { id: "stops", name: "Остановок на км²", unit: "ост./км²", good: "high", get: (p) => p.stops / p.area, fmt: (v) => `${fmt1(v)} /км²`, hint: "Плотность остановок и станций общественного транспорта." },
   { id: "street", name: "Плотность улиц", unit: "км/км²", good: "high", get: (p) => p.streetKm / p.area, fmt: (v) => `${fmt1(v)} км/км²`, hint: "Километров улиц, дорожек и троп на квадратный километр (по OpenStreetMap)." },
-  { id: "pop", chip: "Население", name: "Население", unit: "чел.", good: "none", agg: "sum", get: (p) => p.pop, fmt: fmtPop, hint: "Число жителей (оценка GHSL на 2020 год, сетка около 90 м)." },
-  { id: "dens", chip: "Плотность населения", name: "Плотность населения", unit: "чел./км²", good: "none", get: (p) => p.dens, fmt: fmtDens, hint: "Жителей на квадратный километр района." },
+  { id: "pop", chip: "Население", name: "Население", unit: "чел.", good: "none", agg: "sum", get: (p) => p.pop, fmt: fmtPop, hint: "Число жителей — официальные данные на 2025 год (Росстат, по Википедии)." },
+  { id: "dens", chip: "Плотность населения", name: "Плотность населения", unit: "чел./км²", good: "none", get: (p) => p.dens, fmt: fmtDens, hint: "Жителей на квадратный километр района: официальная численность на площадь района по OpenStreetMap." },
   { id: "popm", chip: "Жители у метро", name: "Жителей ≤ 10 мин пешком от метро", unit: "%", good: "high", get: (p) => (p.popM10 ?? 0) * 100, fmt: (v) => `${Math.round(v)}%`, hint: "Какая доля жителей района живёт не дальше 10 минут пешком (по улицам) от станции метро или МЦК." },
   { id: "area", name: "Площадь", unit: "км²", good: "none", get: (p) => p.area, fmt: (v) => `${fmtKm(v)} км²`, hint: "Площадь района." },
 ];
