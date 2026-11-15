@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Куда доберёшься — Москва</title>
+  <meta name="description" content="Зона досягаемости по Москве: куда можно добраться пешком и на общественном транспорте за заданное время, карта удалённости от центра и доступности районов.">
+  <style>
+    :root {
+      --bg: #fbf8f2; --ink: #1d2a33; --muted: #6b7780; --line: #e3ddd0; --accent: #0b3c5d; --accent-ink: #fff;
+      --chip: #f1ece0; --shadow: 0 6px 28px rgba(20, 30, 40, .18); --c1: #0b3c5d; --c2: #c0392b;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #1b2229; --ink: #eef1f3; --muted: #93a0aa; --line: #2e3841; --accent: #8fd18a; --accent-ink: #10201a; --chip: #26303a; --shadow: 0 6px 28px rgba(0,0,0,.5); --c1: #8fd18a; --c2: #ff8a7a; }
+    }
+    * { box-sizing: border-box; }
+    html, body, #map { margin: 0; height: 100%; }
+    body { font: 15px/1.4 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; color: var(--ink); background: var(--bg); }
+    [hidden] { display: none !important; }
+
+    #panel {
+      position: absolute; z-index: 2; top: 16px; left: 16px; width: 360px; max-height: calc(100% - 32px); overflow: auto;
+      background: var(--bg); border-radius: 16px; box-shadow: var(--shadow); padding: 14px 18px 14px;
+    }
+    .tabs { display: flex; flex-wrap: wrap; gap: 4px; background: var(--chip); border-radius: 10px; padding: 3px; margin: 0 0 14px; }
+    .tabs button { flex: 1 1 28%; border: 0; background: none; color: var(--muted); padding: 7px 2px; border-radius: 8px; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; line-height: 1.2; }
+    .tabs button[aria-pressed=true] { background: var(--bg); color: var(--ink); box-shadow: 0 1px 4px rgba(0,0,0,.18); }
+    h1 { margin: 0 0 2px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+    .big { font-size: 40px; font-weight: 700; line-height: 1.05; letter-spacing: -.02em; }
+    .big small { font-size: 18px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+    .area { color: var(--muted); margin: 2px 0 12px; min-height: 21px; }
+    .area b { color: var(--ink); font-weight: 600; }
+
+    input[type=range] { width: 100%; margin: 0 0 14px; accent-color: var(--accent); }
+    .seg { display: flex; background: var(--chip); border-radius: 10px; padding: 3px; margin-bottom: 12px; }
+    .seg button { flex: 1; border: 0; background: none; color: var(--ink); padding: 8px 6px; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; }
+    .seg button[aria-pressed=true] { background: var(--accent); color: var(--accent-ink); }
+    .label { font-size: 12px; color: var(--muted); margin: 10px 0 6px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { border: 1px solid var(--line); background: var(--chip); color: var(--muted); padding: 5px 10px; border-radius: 999px; font: inherit; font-size: 13px; cursor: pointer; }
+    .chip[aria-pressed=true] { color: var(--ink); border-color: var(--accent); background: var(--bg); box-shadow: inset 0 0 0 1px var(--accent); }
+
+    .legend { display: flex; margin-top: 14px; border-radius: 6px; overflow: hidden; height: 8px; }
+    .legend i { flex: 1; }
+    .legend.grad { height: 10px; }
+    .legend-t { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .hint { margin: 12px 0 0; font-size: 12.5px; color: var(--muted); }
+    .note { margin: 0 0 10px; font-size: 13px; color: var(--muted); }
+    details { margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+    details summary { cursor: pointer; }
+    details p { margin: 6px 0 0; }
+
+    /* статистика */
+    .card { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+    .tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .tile { background: var(--chip); border-radius: 10px; padding: 8px 10px; }
+    .tile b { display: block; font-size: 20px; line-height: 1.15; letter-spacing: -.01em; }
+    .tile span { font-size: 12px; color: var(--muted); }
+    .chart { margin-top: 10px; width: 100%; height: auto; display: block; overflow: visible; }
+    .chart text { fill: var(--muted); font-size: 10px; }
+    .chart .grid { stroke: var(--line); stroke-width: 1; }
+    .chart .l1 { fill: none; stroke: var(--c1); stroke-width: 2.2; }
+    .chart .l2 { fill: none; stroke: var(--c2); stroke-width: 1.6; stroke-dasharray: 4 3; }
+    .chart .mk { stroke: var(--ink); stroke-width: 1; stroke-dasharray: 2 2; }
+    .chart .dot { fill: var(--c1); stroke: var(--bg); stroke-width: 2; }
+    .key { display: flex; gap: 12px; font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .key i { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--c1); vertical-align: middle; margin-right: 4px; }
+    .key i.d { border-top: 2px dashed var(--c2); }
+    .dcard { position: relative; }
+    .card-h { display: flex; flex-direction: column; margin-bottom: 8px; padding-right: 26px; }
+    .card-h b { font-size: 18px; letter-spacing: -.01em; }
+    .card-h span { font-size: 12.5px; color: var(--muted); }
+    .card-h .x { position: absolute; top: 0; right: 0; border: 0; background: var(--chip); color: var(--muted); width: 24px; height: 24px; border-radius: 50%; font-size: 16px; line-height: 1; cursor: pointer; }
+    .rk { display: flex; align-items: center; gap: 8px; font-size: 12.5px; margin: 4px 0; }
+    .rk .rn { width: 128px; flex: none; color: var(--muted); }
+    .rk .rb { flex: 1; height: 7px; background: var(--chip); border-radius: 4px; overflow: hidden; }
+    .rk .rb i { display: block; height: 100%; background: var(--c1); border-radius: 4px; }
+    .rk .rv { width: 38px; text-align: right; flex: none; font-variant-numeric: tabular-nums; font-weight: 600; }
+    #tip b { font-weight: 600; }
+    .busy-line { font-size: 12.5px; color: var(--muted); margin-top: 10px; }
+
+    .rank { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
+    .rank li { display: flex; align-items: baseline; gap: 6px; padding: 5px 6px; border-radius: 8px; cursor: pointer; }
+    .rank li:hover { background: var(--chip); }
+    .rank li .n { color: var(--muted); width: 16px; text-align: right; flex: none; }
+    .rank li .nm { flex: 1; min-width: 0; }
+    .rank li .nm small { display: block; color: var(--muted); font-size: 11.5px; }
+    .rank li .v { font-variant-numeric: tabular-nums; font-weight: 600; flex: none; }
+
+    #err { position: absolute; z-index: 5; left: 50%; bottom: 14px; transform: translateX(-50%); max-width: min(560px, 92vw); background: #7a1f1f; color: #fff; padding: 8px 14px; border-radius: 10px; font-size: 13px; box-shadow: var(--shadow); }
+    #busy { position: absolute; z-index: 3; top: 16px; right: 64px; background: var(--bg); padding: 6px 12px; border-radius: 999px; box-shadow: var(--shadow); font-size: 13px; display: none; }
+    #tip { position: absolute; z-index: 4; pointer-events: none; background: var(--bg); color: var(--ink); padding: 5px 9px; border-radius: 8px; box-shadow: var(--shadow); font-size: 12.5px; white-space: nowrap; display: none; }
+    .pin { width: 22px; height: 22px; border-radius: 50%; background: #e8483b; border: 3px solid #fff; box-shadow: 0 2px 8px rgba(0,0,0,.4); cursor: grab; }
+    .pin.center { background: #1d2a33; cursor: default; width: 16px; height: 16px; }
+
+    @media (max-width: 640px) {
+      #panel { top: auto; bottom: 0; left: 0; right: 0; width: auto; max-height: 56%; border-radius: 16px 16px 0 0; padding: 10px 16px 12px; }
+      .big { font-size: 32px; }
+      #busy { top: 10px; right: 56px; }
+    }
+  </style>
+  <script type="module" crossorigin src="/moscow-reach/assets/index-DGd1ptWr.js"></script>
+  <link rel="stylesheet" crossorigin href="/moscow-reach/assets/index--S9olhOP.css">
+</head>
+<body>
+  <div id="map"></div>
+  <div id="busy">Считаю…</div>
+  <div id="tip"></div>
+  <div id="err" hidden></div>
+  <section id="panel">
+    <div class="tabs" id="tabs" role="group" aria-label="Режим">
+      <button data-v="zone" aria-pressed="true">Зона</button>
+      <button data-v="remote" aria-pressed="false">Удалённость</button>
+      <button data-v="access" aria-pressed="false">Доступность</button>
+      <button data-v="districts" aria-pressed="false">Районы</button>
+      <button data-v="pop" aria-pressed="false">Население</button>
+    </div>
+
+    <div class="chips" style="margin:-4px 0 12px"><button class="chip" id="chipMkad" aria-pressed="false" title="Не учитывать территорию за МКАД: зона, статистика, карты и районы считаются только внутри кольца">Без Замкадья · только внутри МКАД</button></div>
+
+    <!-- ===== Зона досягаемости ===== -->
+    <div id="vZone">
+      <h1>Куда доберёшься за</h1>
+      <div class="big"><span id="mins">30</span> <small>мин</small></div>
+      <div class="area" id="area">&nbsp;</div>
+      <input id="slider" type="range" min="5" max="120" step="5" value="30" aria-label="Время в пути, минут">
+
+      <div class="seg" role="group" aria-label="Способ">
+        <button id="bWalk" aria-pressed="false">Пешком</button>
+        <button id="bTransit" aria-pressed="true">Транспорт + пешком</button>
+      </div>
+    </div>
+
+    <!-- ===== Удалённость от центра ===== -->
+    <div id="vRemote" hidden>
+      <h1>Время в пути от центра</h1>
+      <p class="note">Красная площадь → любая точка города. Красный — близко, синий — далеко. Считается с вашими настройками транспорта и темпа.</p>
+    </div>
+
+    <!-- ===== Доступность ===== -->
+    <div id="vAccess" hidden>
+      <h1>Сколько города охватишь за</h1>
+      <div class="big"><span id="aMins">60</span> <small>мин</small></div>
+      <div class="area" id="aSummary">&nbsp;</div>
+      <input id="aSlider" type="range" min="10" max="120" step="10" value="60" aria-label="Время в пути, минут">
+      <p class="note">Цвет — площадь, которую можно охватить за это время, стартуя из данной точки (транспорт + пешком, 5 км/ч). Красный — больше, синий — меньше.</p>
+    </div>
+
+    <!-- ===== Районы ===== -->
+    <div id="vDistricts" hidden>
+      <h1>Районы Москвы</h1>
+      <div class="area" id="dSummary">&nbsp;</div>
+      <div class="chips" id="dMetrics"></div>
+      <div id="dSliderBox" hidden>
+        <div class="label">Время в пути: <b id="dMins">60</b> мин</div>
+        <input id="dSlider" type="range" min="10" max="120" step="10" value="60" aria-label="Время в пути, минут">
+      </div>
+      <p class="note" id="dHint" style="margin-top:8px"></p>
+    </div>
+
+    <!-- ===== Население ===== -->
+    <div id="vPop" hidden>
+      <h1>Плотность населения</h1>
+      <p class="note">Жителей на км² по точкам. Число жителей в каждом районе — официальное (Росстат, 2025, по Википедии); внутри района людей распределяет спутниковая модель GHSL (сетка около 90 м). Перед показом данные усредняются по соседним ячейкам, чтобы не было шума.</p>
+      <div class="label">Сглаживание</div>
+      <div class="chips" id="popSmooth"></div>
+    </div>
+
+    <div id="scaleBox" hidden>
+      <div class="label">Середина шкалы цвета</div>
+      <div class="chips" id="scaleChips"></div>
+      <p class="note" id="scaleInfo" style="margin:6px 0 0"></p>
+    </div>
+
+    <div id="transitOpts">
+      <div class="label">Что использовать</div>
+      <div class="chips" id="chips"></div>
+    </div>
+
+    <div id="paceBox">
+      <div class="label">Темп ходьбы</div>
+      <div class="chips" id="pace"></div>
+    </div>
+
+    <!-- легенда и статистика зоны -->
+    <div id="zoneStats">
+      <div class="legend" id="legend"></div>
+      <div class="legend-t"><span>0</span><span id="legendEnd"></span></div>
+      <div class="card">
+        <div class="tiles">
+          <div class="tile"><b id="tShare">—</b><span>территории Москвы</span></div>
+          <div class="tile"><b id="tStations">—</b><span>станций метро в зоне</span></div>
+          <div class="tile"><b id="tHubs">—</b><span>остановок транспорта</span></div>
+          <div class="tile"><b id="tBoost">—</b><span>транспорт расширяет зону</span></div>
+          <div class="tile"><b id="tPop">—</b><span>жителей в зоне</span></div>
+          <div class="tile"><b id="tPopShare">—</b><span>москвичей в зоне</span></div>
+        </div>
+        <svg class="chart" id="chartZone" viewBox="0 0 320 150" role="img" aria-label="Площадь зоны по времени"></svg>
+        <div class="key"><span><i></i>с транспортом</span><span><i class="d"></i>только пешком</span></div>
+        <div class="busy-line" id="zoneBusy"></div>
+      </div>
+    </div>
+
+    <!-- легенда и статистика удалённости -->
+    <div id="remoteStats" hidden>
+      <div class="legend" id="rLegend"></div>
+      <div class="legend-t"><span>0</span><span>2 ч 30 мин</span></div>
+      <div class="card">
+        <div class="tiles">
+          <div class="tile"><b id="rMedian">—</b><span>типичная дорога до центра</span></div>
+          <div class="tile"><b id="rFar">—</b><span>территории дальше часа пути</span></div>
+        </div>
+        <div class="label">Какая доля Москвы на каком расстоянии от центра</div>
+        <svg class="chart" id="chartRemote" viewBox="0 0 320 140" role="img" aria-label="Доли территории по времени до центра"></svg>
+        <div class="busy-line" id="remoteBusy"></div>
+      </div>
+    </div>
+
+    <!-- легенда и рейтинги доступности -->
+    <div id="accessStats" hidden>
+      <div class="legend grad" id="aLegend"></div>
+      <div class="legend-t"><span id="aLo"></span><span id="aMid"></span><span id="aHi"></span></div>
+      <div class="card">
+        <div class="label">Самые доступные места</div>
+        <ol class="rank" id="rankTop"></ol>
+        <div class="label">Самые изолированные места</div>
+        <ol class="rank" id="rankBottom"></ol>
+        <p class="hint">Нажмите на место в списке, чтобы посмотреть его зону досягаемости. Наведите курсор на карту, чтобы увидеть значение. В малонаселённых местах без дорог на карте цифры занижены.</p>
+      </div>
+    </div>
+
+    <!-- легенда и статистика населения -->
+    <div id="popStats" hidden>
+      <div class="legend grad" id="pLegend"></div>
+      <div class="legend-t"><span id="pLo"></span><span id="pMid"></span><span id="pHi"></span></div>
+      <div class="card">
+        <div class="tiles">
+          <div class="tile"><b id="pTotal">—</b><span>жителей Москвы (2025)</span></div>
+          <div class="tile"><b id="pAvg">—</b><span>средняя плотность</span></div>
+          <div class="tile"><b id="pHalf">—</b><span>территории, где живёт половина москвичей</span></div>
+          <div class="tile"><b id="pPeak">—</b><span>плотность в самой плотной точке</span></div>
+        </div>
+        <div class="label">Где живут москвичи: доля жителей по плотности</div>
+        <svg class="chart" id="chartPop" viewBox="0 0 320 130" role="img" aria-label="Доли жителей по плотности"></svg>
+        <div class="label">Самые плотные места</div>
+        <ol class="rank" id="popPeaks"></ol>
+        <p class="hint">Наведите курсор на карту, чтобы увидеть плотность в точке. Суммы по районам официальные, а где именно внутри района живут люди — модельная оценка.</p>
+      </div>
+    </div>
+
+    <!-- легенда, рейтинги и карточка района -->
+    <div id="districtsStats" hidden>
+      <div class="legend grad" id="dLegend"></div>
+      <div class="legend-t"><span id="dLo"></span><span id="dMid"></span><span id="dHi"></span></div>
+      <div class="card dcard" id="dCard" hidden></div>
+      <div class="card">
+        <div class="label" id="dTopLabel">Лучшие</div>
+        <ol class="rank" id="dTop"></ol>
+        <div class="label" id="dBottomLabel">Худшие</div>
+        <ol class="rank" id="dBottom"></ol>
+        <div class="label" id="dOkrugLabel">По округам</div>
+        <svg class="chart" id="chartOkrug" viewBox="0 0 320 200" role="img" aria-label="Показатель по округам"></svg>
+        <p class="hint">Нажмите на район на карте или в списке — откроется карточка со статистикой. Численность жителей — официальные данные на 2025 год (Росстат, по Википедии), границы районов — OpenStreetMap, поэтому у районов на границе города или МКАД возможны небольшие расхождения.</p>
+      </div>
+    </div>
+
+    <div class="label">На карте</div>
+    <div class="chips"><button class="chip" id="chipMetro" aria-pressed="true">Метро, МЦК и МЦД</button><button class="chip" id="chipBoundary" aria-pressed="true">Границы Москвы</button></div>
+
+    <p class="hint" id="hintZone">Нажмите на карту или перетащите красную точку, чтобы сменить место старта.</p>
+    <details>
+      <summary>Как это считается</summary>
+      <p>Маршруты и остановки — из OpenStreetMap. Расписаний нет: время ожидания — половина типового интервала (метро ≈ 4,5 мин, автобус ≈ 10 мин и т. д.), скорости заданы по виду транспорта. Пешком — только по улицам, дорожкам и мостам; реки и железные дороги — препятствия. Это оценка «будний день, днём», а не расписание.</p>
+      <p id="ver"></p>
+    </details>
+  </section>
+</body>
+</html>
