@@ -91,7 +91,7 @@ export function createDistricts({ map, $, state, BASE, beforeId, getMean, onChan
     const legend = $("dLegend"); legend.style.background = `linear-gradient(90deg, ${[0, 0.25, 0.5, 0.75, 1].map((x) => `rgb(${lerpPal(VIR, 1 - (m.good === "low" ? 1 - x : x))})`).join(",")})`;
     $("dLo").textContent = m.fmt(sc.min); $("dMid").textContent = `${MEANS.find((x) => x.id === getMean()).short} ${m.fmt(sc.mid)}`; $("dHi").textContent = m.fmt(sc.max);
     $("scaleInfo").textContent = `Среднее по районам: арифм. ${m.fmt(sc.arith)} · геом. ${m.fmt(sc.geo)} · квадр. ${m.fmt(sc.quad)}`;
-    $("dSummary").innerHTML = `${m.name.replace("N", `<b>${state.aT}</b>`)}${m.good === "low" ? " · <small>ярче — лучше</small>" : m.good === "high" ? " · <small>ярче — больше</small>" : ""}`;
+    $("dSummary").innerHTML = `${m.name.replace("N", `<b>${state.aT}</b>`)}${m.good === "low" ? " · <small>красный — лучше</small>" : m.good === "high" ? " · <small>красный — больше</small>" : ""}`;
     // рейтинги: лучшие и худшие
     const order = feats.map((f, i) => ({ f, v: vals[i] })).sort((a, b) => (m.good === "low" ? a.v - b.v : b.v - a.v));
     const fillList = (el, list) => {

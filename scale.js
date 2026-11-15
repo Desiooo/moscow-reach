@@ -1,8 +1,9 @@
 // Палитры и шкала цвета, общие для тепловой карты и районов.
 export const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 export const PAL = ["#0b3c5d", "#1d6a8a", "#2fa4a0", "#8fd18a", "#f4e285"].map(hex);
-// viridis: ярко-жёлтый → тёмно-фиолетовый
-export const VIR = ["#fde725", "#b5de2b", "#6ece58", "#35b779", "#1f9e89", "#26828e", "#31688e", "#3e4989", "#482878", "#440154"].map(hex);
+// радуга: красный (лучше / больше / ближе) → синий; 10 ступеней, переходы между цветами хорошо заметны
+const RAINBOW = ["#d7191c", "#f57c00", "#ffd400", "#43b84a", "#12b5cb", "#2b4de0"].map(hex);
+export const VIR = []; // заполняется ниже (нужна lerpPal)
 
 export function lerpPal(pal, x) { // x ∈ [0,1]
   const p = Math.max(0, Math.min(1, x)) * (pal.length - 1), a = Math.floor(p), b = Math.min(pal.length - 1, a + 1), f = p - a;
@@ -35,3 +36,4 @@ export function makeScale(vals, kind, meanVals = vals) {
   const f = (v) => (v <= m ? 0.5 * (v - min) / (m - min) : 0.5 + 0.5 * (v - m) / (max - m));
   return { min, max, mid: m, arith, geo, quad, f: (v) => Math.max(0, Math.min(1, f(v))) };
 }
+for (let i = 0; i < 10; i++) VIR.push(lerpPal(RAINBOW, i / 9));
