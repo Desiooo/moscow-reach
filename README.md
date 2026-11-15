@@ -7,7 +7,7 @@
 - Остановки и маршруты метро, МЦК, МЦД, трамваев, троллейбусов и автобусов — из OpenStreetMap (Overpass).
 - Расписаний нет: ожидание = половина типового интервала для вида транспорта, скорости заданы по виду транспорта.
   Это оценка «будний день, днём».
-- Пешком — по прямой с коэффициентом 1,3, реки и железные дороги не учитываются.
+- Пешком — только по улицам, дорожкам, мостам и переходам: граф собран из карты (OpenStreetMap), реки, каналы и железные дороги — препятствия, пересекать их можно лишь там, где есть мост или переход. Закрашивается сама улица и узкая полоса вокруг неё (дворы, парки).
 - Параметры сверены с Яндекс Картами на нескольких поездках по метро (разница в пределах 3–7 минут).
 
 ## Запуск
@@ -15,8 +15,11 @@
 npm install
 npm run dev
 ```
-Данные сети (`public/network.json`) собираются так:
-`./fetchall2.sh && node scripts/build-network.mjs raw2 public/network.json`
+Данные собираются так:
+- транспорт: `./fetchall2.sh && node scripts/build-network.mjs raw2 public/network.json`
+- улицы и препятствия (нужны `moscow.pmtiles` и граница города `raw/boundary.json`):
+  `MARGIN_M=1500 node scripts/build-streets.mjs moscow.pmtiles build-out && cp build-out/*.gz public/`
+- метро на карте: `./fetch-metro.sh && node scripts/build-metro.mjs raw/metro.json public/metro.json`
 
 ## Публикация на GitHub Pages
 `./deploy.sh` — собирает сайт и заливает в ветку `gh-pages` (нужен токен в `~/.gh-token`).

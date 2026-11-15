@@ -1,6 +1,6 @@
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { Reach, CELL } from "./engine.js";
+import { Reach, CELL, parseStreets } from "./engine.js";
 
 const STYLE_URL = "https://tiles.openfreemap.org/styles/positron"; // бесплатная векторная карта, без ключей
 const BASE = import.meta.env.BASE_URL;
@@ -80,8 +80,7 @@ function syncSeg() {
 }
 $("bWalk").onclick = () => { state.transit = false; syncSeg(); changed(true); };
 $("bTransit").onclick = () => { state.transit = true; syncSeg(); changed(true); };
-slider.oninput = () => { state.minutes = Number(slider.value); quality = 1; changed(false); };
-slider.onchange = () => { quality = 2; changed(false); };
+slider.oninput = () => { state.minutes = Number(slider.value); changed(false); };
 syncSeg();
 
 // ---------- расчёт и отрисовка ----------
@@ -100,7 +99,7 @@ function colorAt(i, n) { // i-я из n полос → цвет из палит�
 }
 
 let reach = null, pin = null, canvas = null, ctx = null, lastBlob = null;
-let needRun = true, timer = 0, quality = 2;
+let needRun = true, timer = 0;
 
 function changed(rerun) {
   if (rerun) needRun = true;
@@ -117,46 +116,35 @@ function update() {
   if (needRun) {
     const modes = [false, false, false, false, false, false];
     if (state.transit) GROUPS.forEach((g, i) => state.groups[i] && g.modes.forEach((m) => (modes[m] = true)));
-    reach.run(state.lon, state.lat, { walkMs: (PACES[state.pace].kmh * 1000) / 3600, modes, maxSec: 120 * 60 });
+    const ok = reach.run(state.lon, state.lat, { walkMs: (PACES[state.pace].kmh * 1000) / 3600, modes, maxSec: 120 * 60 });
     needRun = false;
+    if (!ok) { $("area").textContent = "Рядом со стартом нет улиц — выберите точку в городе"; return; }
   }
   const best = reach.raster(budget);
   const { W, H } = reach;
   const step = bandStep(minutes), stepSec = step * 60;
   const nb = Math.ceil(minutes / step);
   const cols = Array.from({ length: nb }, (_, i) => colorAt(i, nb));
-  const SS = quality;
-  const OW = W * SS, OH = H * SS;
-  if (canvas.width !== OW || canvas.height !== OH) { canvas.width = OW; canvas.height = OH; }
-  // 1) полосы на сетке SS×, время интерполируем билинейно
-  const cap = budget * 2;
-  const tv = (x, y) => { const t = best[y * W + x]; return t < cap ? t : cap; };
-  const bands = new Int8Array(OW * OH);
+  if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
+  // полосы по времени; границы полос и внешний край — тёмной тонкой линией
+  const bands = new Int8Array(W * H);
   let cells = 0;
-  for (let oy = 0; oy < OH; oy++) {
-    const gy = Math.min(H - 1.001, Math.max(0, (oy + 0.5) / SS - 0.5)), y0 = Math.floor(gy), fy = gy - y0;
-    for (let ox = 0; ox < OW; ox++) {
-      const gx = Math.min(W - 1.001, Math.max(0, (ox + 0.5) / SS - 0.5)), x0 = Math.floor(gx), fx = gx - x0;
-      const t = (tv(x0, y0) * (1 - fx) + tv(x0 + 1, y0) * fx) * (1 - fy) + (tv(x0, y0 + 1) * (1 - fx) + tv(x0 + 1, y0 + 1) * fx) * fy;
-      const v = t <= budget ? Math.min(nb - 1, Math.floor(t / stepSec)) : -1;
-      bands[oy * OW + ox] = v;
-      if (v >= 0) cells++;
-    }
+  for (let i = 0; i < bands.length; i++) {
+    const t = best[i];
+    if (t <= budget) { bands[i] = Math.min(nb - 1, Math.floor(t / stepSec)); cells++; } else bands[i] = -1;
   }
-  cells /= SS * SS;
-  // 2) раскраска; границы полос и внешний край — тёмной тонкой линией
-  const img = ctx.createImageData(OW, OH);
+  const img = ctx.createImageData(W, H);
   const d = img.data;
-  for (let y = 0; y < OH; y++) {
-    const row = (OH - 1 - y) * OW; // y вверх → строка картинки сверху
-    for (let x = 0; x < OW; x++) {
-      const idx = y * OW + x, bnd = bands[idx];
+  for (let y = 0; y < H; y++) {
+    const row = (H - 1 - y) * W; // y вверх → строка картинки сверху
+    for (let x = 0; x < W; x++) {
+      const idx = y * W + x, bnd = bands[idx];
       if (bnd < 0) continue;
       const o = (row + x) * 4, c = cols[bnd];
-      const edge = (x + 1 < OW && bands[idx + 1] !== bnd) || (y + 1 < OH && bands[idx + OW] !== bnd) || (x > 0 && bands[idx - 1] < 0) || (y > 0 && bands[idx - OW] < 0);
+      const edge = (x + 1 < W && bands[idx + 1] !== bnd) || (y + 1 < H && bands[idx + W] !== bnd) || (x > 0 && bands[idx - 1] < 0) || (y > 0 && bands[idx - W] < 0);
       const k = edge ? 0.6 : 1;
       d[o] = c[0] * k; d[o + 1] = c[1] * k; d[o + 2] = c[2] * k;
-      d[o + 3] = edge ? 220 : 150;
+      d[o + 3] = edge ? 200 : 150;
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -189,7 +177,6 @@ function syncUrl() {
 
 function setOrigin(lon, lat) {
   if (!reach.inside(lon, lat)) return;
-  quality = 2;
   state.lon = lon; state.lat = lat;
   pin.setLngLat([lon, lat]);
   changed(true);
@@ -198,10 +185,26 @@ function setOrigin(lon, lat) {
 // ---------- запуск ----------
 map.on("load", async () => {
   $("busy").style.display = "block"; $("busy").textContent = "Загружаю сеть…";
-  const net = await (await fetch(`${BASE}network.json`)).json();
-  reach = new Reach(net);
+  // Сервер может отдать файл и сжатым (GitHub Pages), и уже распакованным (dev-сервер с Content-Encoding) —
+  // смотрим на первые байты: 1f 8b = gzip.
+  const gunzip = async (url) => {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`${url}: ${r.status}`);
+    const buf = await r.arrayBuffer();
+    const head = new Uint8Array(buf, 0, 2);
+    if (head[0] !== 0x1f || head[1] !== 0x8b) return buf;
+    return new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
+  };
+  const [net, streetsBuf, barrierBuf] = await Promise.all([
+    fetch(`${BASE}network.json`).then((r) => r.json()),
+    gunzip(`${BASE}streets.bin.gz`),
+    gunzip(`${BASE}barrier.bin.gz`),
+  ]);
+  $("busy").textContent = "Строю граф улиц…";
+  await new Promise((r) => setTimeout(r, 30)); // дать перерисоваться подписи
+  reach = new Reach(net, parseStreets(streetsBuf), new Uint8Array(barrierBuf));
   canvas = document.createElement("canvas");
-  canvas.width = reach.W * 2; canvas.height = reach.H * 2;
+  canvas.width = reach.W; canvas.height = reach.H;
   ctx = canvas.getContext("2d");
 
   const firstSymbol = map.getStyle().layers.find((l) => l.type === "symbol")?.id;
@@ -211,6 +214,21 @@ map.on("load", async () => {
     coordinates: reach.corners,
   });
   map.addLayer({ id: "reach", type: "raster", source: "reach", paint: { "raster-opacity": 1, "raster-fade-duration": 0 } }, firstSymbol);
+
+  // ---- метро, МЦК и МЦД на карте
+  map.addSource("metro", { type: "geojson", data: `${BASE}metro.json` });
+  const isLine = ["==", ["geometry-type"], "LineString"];
+  const W = (a, b) => ["interpolate", ["linear"], ["zoom"], 9, a, 15, b];
+  map.addLayer({ id: "metro-casing", type: "line", source: "metro", filter: ["all", isLine, ["!=", ["get", "kind"], "mcd"]], layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": "#fff", "line-opacity": 0.85, "line-width": W(3.5, 9) } }, firstSymbol);
+  map.addLayer({ id: "mcd-lines", type: "line", source: "metro", filter: ["all", isLine, ["==", ["get", "kind"], "mcd"]], layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["get", "colour"], "line-opacity": 0.8, "line-width": W(1, 3) } }, firstSymbol);
+  map.addLayer({ id: "metro-lines", type: "line", source: "metro", filter: ["all", isLine, ["!=", ["get", "kind"], "mcd"]], layout: { "line-cap": "round", "line-join": "round" }, paint: { "line-color": ["get", "colour"], "line-width": W(1.8, 5.5) } }, firstSymbol);
+  map.addLayer({ id: "metro-stations", type: "circle", source: "metro", filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], true]], paint: { "circle-radius": W(2, 6), "circle-color": "#fff", "circle-stroke-width": W(1, 2.2), "circle-stroke-color": ["case", ["==", ["get", "n"], 1], ["get", "colours"], "#2b2b2b"] } }, firstSymbol);
+  map.addLayer({ id: "mcd-stations", type: "circle", minzoom: 11, source: "metro", filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], false]], paint: { "circle-radius": W(1.5, 4), "circle-color": "#fff", "circle-stroke-width": 1.2, "circle-stroke-color": "#555" } }, firstSymbol);
+  map.addLayer({ id: "metro-labels", type: "symbol", source: "metro", minzoom: 11.5, filter: ["all", ["==", ["get", "kind"], "station"], ["==", ["get", "metro"], true]], layout: { "text-field": ["get", "name"], "text-font": ["Noto Sans Regular"], "text-size": 12, "text-offset": [0, 0.9], "text-anchor": "top", "text-optional": true }, paint: { "text-color": "#222", "text-halo-color": "#fff", "text-halo-width": 1.5 } });
+  const METRO_LAYERS = ["metro-casing", "mcd-lines", "metro-lines", "metro-stations", "mcd-stations", "metro-labels"];
+  const setMetro = (on) => { for (const id of METRO_LAYERS) map.setLayoutProperty(id, "visibility", on ? "visible" : "none"); };
+  const chip = $("chipMetro");
+  chip.onclick = () => { const on = chip.getAttribute("aria-pressed") !== "true"; chip.setAttribute("aria-pressed", on); setMetro(on); };
 
   const el = document.createElement("div"); el.className = "pin";
   pin = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([state.lon, state.lat]).addTo(map);
